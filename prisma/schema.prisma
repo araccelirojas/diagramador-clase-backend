@@ -6,13 +6,54 @@ datasource db {
   provider = "postgresql"
 }
 
-model Diagram {
-  id          String   @id @default(uuid())
-  name        String
-  description String   @default("")
-  nodes       Json     @default("[]")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+model Usuario {
+  idUsuario     String   @id @default(uuid()) @db.Uuid
+  nombre        String
+  correo        String   @unique
+  password      String
+  fechaRegistro DateTime @default(now())
+  estado        Boolean  @default(true)
 
-  @@map("diagrams")
+  proyectos    Proyecto[]
+  invitaciones Invitacion[]
+
+  @@map("usuarios")
+}
+
+model Proyecto {
+  idProyecto    String   @id @default(uuid()) @db.Uuid
+  nombre        String
+  contenido     Json     @default("{}")
+  fechaCreacion DateTime @default(now())
+
+  idUsuario String  @db.Uuid
+  usuario   Usuario @relation(fields: [idUsuario], references: [idUsuario], onDelete: Cascade)
+
+  invitaciones Invitacion[]
+
+  @@index([idUsuario])
+  @@map("proyectos")
+}
+
+model Invitacion {
+  idInvitacion    String           @id @default(uuid()) @db.Uuid
+  estado          EstadoInvitacion @default(PENDIENTE)
+  fechaInvitacion DateTime         @default(now())
+
+  idUsuario String  @db.Uuid
+  usuario   Usuario @relation(fields: [idUsuario], references: [idUsuario], onDelete: Cascade)
+
+  idProyecto String   @db.Uuid
+  proyecto   Proyecto @relation(fields: [idProyecto], references: [idProyecto], onDelete: Cascade)
+
+  // Un usuario no puede tener dos invitaciones al mismo proyecto.
+  @@unique([idUsuario, idProyecto])
+  @@index([idProyecto])
+  @@map("invitaciones")
+}
+
+enum EstadoInvitacion {
+  PENDIENTE
+  ACEPTADA
+  RECHAZADA
 }

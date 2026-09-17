@@ -1,8 +1,11 @@
 const app = require('./app');
 const prisma = require('./config/prisma');
-const { port } = require('./config/env');
+const { aplicarMigracionesPendientes } = require('./config/migrate');
+const { port, autoMigrate } = require('./config/env');
 
 async function main() {
+  if (autoMigrate) await aplicarMigracionesPendientes();
+
   // Una query real: con adaptadores, $connect() no valida las credenciales.
   await prisma.$queryRaw`SELECT 1`;
   console.log('Conectado a PostgreSQL');

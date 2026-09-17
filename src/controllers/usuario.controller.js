@@ -1,6 +1,5 @@
-const service = require('../services/diagram.service');
+const service = require('../services/usuario.service');
 
-// Solo traduce HTTP <-> servicio. Los errores van al errorHandler via next().
 async function list(req, res, next) {
   try {
     res.json(await service.list());
@@ -17,17 +16,9 @@ async function getById(req, res, next) {
   }
 }
 
-async function create(req, res, next) {
-  try {
-    res.status(201).json(await service.create(req.body));
-  } catch (error) {
-    next(error);
-  }
-}
-
 async function update(req, res, next) {
   try {
-    res.json(await service.update(req.params.id, req.body));
+    res.json(await service.update(req.params.id, req.body, req.usuario.idUsuario));
   } catch (error) {
     next(error);
   }
@@ -35,11 +26,11 @@ async function update(req, res, next) {
 
 async function remove(req, res, next) {
   try {
-    await service.remove(req.params.id);
+    await service.remove(req.params.id, req.usuario.idUsuario);
     res.status(204).send();
   } catch (error) {
     next(error);
   }
 }
 
-module.exports = { list, getById, create, update, remove };
+module.exports = { list, getById, update, remove };

@@ -1,0 +1,305 @@
+{
+  "info": {
+    "name": "diagramador-backend",
+    "description": "API del diagramador: autenticacion JWT, usuarios, proyectos (diagramas) e invitaciones.\n\n## Como usarla\n\n1. Importa tambien el environment `diagramador-local` y selecciondalo (arriba a la derecha en Postman).\n2. Ejecuta `01 - Auth / Login` (o `Registro` si es la primera vez).\n3. Copia el `token` de la respuesta y pegalo en la variable `token` del environment (icono del ojo, arriba a la derecha).\n4. A partir de ahi, todas las peticiones protegidas ya llevan `Authorization: Bearer {{token}}` automaticamente, porque el header usa esa variable.\n\nNo hay scripts de ningun tipo: cada peticion es un JSON de ida y un JSON de vuelta, para que veas exactamente que se envia y que responde la API.\n\n## Variables\n\n| Variable | Para que sirve | Como se completa |\n|---|---|---|\n| `baseUrl` | Raiz de la API | Ya viene con `http://localhost:3000/api` |\n| `token` | JWT para las rutas protegidas | Lo pegas vos despues de Login/Registro |\n| `idUsuario` | UUID de un usuario | Lo pegas vos desde una respuesta |\n| `idProyecto` | UUID de un proyecto | Lo pegas vos desde una respuesta |\n| `idInvitacion` | UUID de una invitacion | Lo pegas vos desde una respuesta |\n\nSi preferis, tambien podes escribir el UUID directo en la URL de cada peticion en lugar de usar la variable.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000/api", "type": "string" },
+    { "key": "token", "value": "", "type": "string" },
+    { "key": "idUsuario", "value": "", "type": "string" },
+    { "key": "idProyecto", "value": "", "type": "string" },
+    { "key": "idInvitacion", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "00 - Salud",
+      "description": "Comprobacion de que el servidor responde. No requiere token.",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] },
+            "description": "Devuelve `{ status: 'ok' }` si la API esta levantada."
+          }
+        }
+      ]
+    },
+    {
+      "name": "01 - Auth",
+      "description": "Registro, login y perfil.\n\nRegistro y login son publicos. Perfil requiere el header `Authorization: Bearer {{token}}`, heredado de la coleccion.",
+      "item": [
+        {
+          "name": "Registro",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Ana\",\n  \"correo\": \"ana@test.com\",\n  \"password\": \"secreta123\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/auth/registro", "host": ["{{baseUrl}}"], "path": ["auth", "registro"] },
+            "description": "Crea la cuenta y devuelve `{ token, usuario }`.\n\nSi el correo ya existe, cambialo antes de reenviar (el registro devuelve 409 con correos repetidos)."
+          }
+        },
+        {
+          "name": "Login",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"correo\": \"ana@test.com\",\n  \"password\": \"secreta123\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] },
+            "description": "Devuelve `{ token, usuario }`. Copia el `token` de la respuesta y pegalo en la variable `token` del environment."
+          }
+        },
+        {
+          "name": "Perfil",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/auth/perfil", "host": ["{{baseUrl}}"], "path": ["auth", "perfil"] },
+            "description": "Datos del usuario duenio del token. Requiere haber pegado el `token` en el environment."
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Usuarios",
+      "description": "CRUD de usuarios. Todas requieren `token`.\n\nActualizar y eliminar solo funcionan sobre la propia cuenta (el usuario del token): hacerlo sobre otro id devuelve 403.",
+      "item": [
+        {
+          "name": "Listar usuarios",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/usuarios", "host": ["{{baseUrl}}"], "path": ["usuarios"] }
+          }
+        },
+        {
+          "name": "Obtener usuario",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/usuarios/{{idUsuario}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["usuarios", "{{idUsuario}}"]
+            },
+            "description": "Pega el UUID del usuario en la variable `idUsuario`, o escribilo directo en la URL."
+          }
+        },
+        {
+          "name": "Actualizar usuario",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Ana Maria\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/usuarios/{{idUsuario}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["usuarios", "{{idUsuario}}"]
+            },
+            "description": "Campos admitidos (todos opcionales, al menos uno): `nombre`, `correo`, `password`, `estado` (booleano)."
+          }
+        },
+        {
+          "name": "Eliminar usuario",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/usuarios/{{idUsuario}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["usuarios", "{{idUsuario}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 - Proyectos",
+      "description": "CRUD de proyectos. El campo `contenido` es el JSON del diagrama: acepta cualquier objeto, el backend no impone su forma.\n\n`GET` y `PUT` de `/contenido` son las rutas pensadas para que el editor cargue y guarde el diagrama sin tocar el nombre del proyecto.",
+      "item": [
+        {
+          "name": "Crear proyecto",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Diagrama de clases\",\n  \"contenido\": {\n    \"nodos\": [\n      { \"id\": \"n1\", \"tipo\": \"clase\", \"nombre\": \"Usuario\", \"x\": 40, \"y\": 60 },\n      { \"id\": \"n2\", \"tipo\": \"clase\", \"nombre\": \"Proyecto\", \"x\": 320, \"y\": 60 }\n    ],\n    \"relaciones\": [\n      { \"desde\": \"n1\", \"hasta\": \"n2\", \"tipo\": \"asociacion\", \"cardinalidad\": \"1..*\" }\n    ]\n  }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/proyectos", "host": ["{{baseUrl}}"], "path": ["proyectos"] },
+            "description": "`contenido` es opcional; si lo omites se guarda `{}`. Copia el `idProyecto` de la respuesta a la variable del mismo nombre para usarlo en las demas peticiones."
+          }
+        },
+        {
+          "name": "Listar proyectos",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/proyectos", "host": ["{{baseUrl}}"], "path": ["proyectos"] },
+            "description": "Devuelve los proyectos propios mas aquellos donde el usuario tiene una invitacion ACEPTADA."
+          }
+        },
+        {
+          "name": "Obtener proyecto",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/proyectos/{{idProyecto}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["proyectos", "{{idProyecto}}"]
+            }
+          }
+        },
+        {
+          "name": "Actualizar proyecto",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Diagrama de clases v2\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/proyectos/{{idProyecto}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["proyectos", "{{idProyecto}}"]
+            },
+            "description": "Admite `nombre` y/o `contenido`."
+          }
+        },
+        {
+          "name": "Guardar diagrama (contenido)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contenido\": {\n    \"nodos\": [\n      { \"id\": \"n1\", \"tipo\": \"clase\", \"nombre\": \"Usuario\", \"x\": 40, \"y\": 60, \"atributos\": [\"idUsuario\", \"nombre\", \"correo\"] },\n      { \"id\": \"n2\", \"tipo\": \"clase\", \"nombre\": \"Proyecto\", \"x\": 320, \"y\": 60, \"atributos\": [\"idProyecto\", \"nombre\", \"contenido\"] },\n      { \"id\": \"n3\", \"tipo\": \"clase\", \"nombre\": \"Invitacion\", \"x\": 180, \"y\": 260, \"atributos\": [\"idInvitacion\", \"estado\"] }\n    ],\n    \"relaciones\": [\n      { \"desde\": \"n1\", \"hasta\": \"n2\", \"tipo\": \"asociacion\", \"cardinalidad\": \"1..*\" },\n      { \"desde\": \"n1\", \"hasta\": \"n3\", \"tipo\": \"asociacion\", \"cardinalidad\": \"1..*\" },\n      { \"desde\": \"n2\", \"hasta\": \"n3\", \"tipo\": \"asociacion\", \"cardinalidad\": \"1..*\" }\n    ]\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/proyectos/{{idProyecto}}/contenido",
+              "host": ["{{baseUrl}}"],
+              "path": ["proyectos", "{{idProyecto}}", "contenido"]
+            },
+            "description": "Lo que llamaria el editor al pulsar Guardar. No modifica el nombre del proyecto."
+          }
+        },
+        {
+          "name": "Cargar diagrama (contenido)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/proyectos/{{idProyecto}}/contenido",
+              "host": ["{{baseUrl}}"],
+              "path": ["proyectos", "{{idProyecto}}", "contenido"]
+            },
+            "description": "Lo que llamaria el editor al abrir un proyecto. Devuelve solo `{ idProyecto, contenido }`."
+          }
+        },
+        {
+          "name": "Eliminar proyecto",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/proyectos/{{idProyecto}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["proyectos", "{{idProyecto}}"]
+            },
+            "description": "Solo el dueno del proyecto puede eliminarlo."
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Invitaciones",
+      "description": "Compartir un proyecto con otro usuario.\n\nPara probar el flujo completo necesitas dos cuentas (registra una segunda con `01 - Auth / Registro`, cambiando el correo). Se invita por correo, no por UUID.\n\nPara aceptar/rechazar hace falta el `token` del usuario invitado: cambia el valor de la variable `token` por el suyo antes de llamar a Responder invitacion.",
+      "item": [
+        {
+          "name": "Crear invitacion",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idProyecto\": \"{{idProyecto}}\",\n  \"correo\": \"beto@test.com\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/invitaciones", "host": ["{{baseUrl}}"], "path": ["invitaciones"] },
+            "description": "Solo el dueno del proyecto puede invitar. Copia el `idInvitacion` de la respuesta a la variable del mismo nombre."
+          }
+        },
+        {
+          "name": "Listar invitaciones",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/invitaciones", "host": ["{{baseUrl}}"], "path": ["invitaciones"] },
+            "description": "Devuelve las invitaciones recibidas por el usuario del token mas las emitidas sobre sus propios proyectos."
+          }
+        },
+        {
+          "name": "Obtener invitacion",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/invitaciones/{{idInvitacion}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["invitaciones", "{{idInvitacion}}"]
+            }
+          }
+        },
+        {
+          "name": "Responder invitacion",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"estado\": \"ACEPTADA\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/invitaciones/{{idInvitacion}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["invitaciones", "{{idInvitacion}}"]
+            },
+            "description": "Solo el destinatario puede responder: el `token` debe ser el suyo. Valores validos de `estado`: `ACEPTADA`, `RECHAZADA`, `PENDIENTE`."
+          }
+        },
+        {
+          "name": "Eliminar invitacion",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/invitaciones/{{idInvitacion}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["invitaciones", "{{idInvitacion}}"]
+            },
+            "description": "Puede cancelarla el dueno del proyecto o el propio destinatario."
+          }
+        }
+      ]
+    }
+  ]
+}
