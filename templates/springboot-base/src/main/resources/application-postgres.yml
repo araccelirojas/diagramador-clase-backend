@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# Perfil `postgres` — uso real.
+#
+#   ./mvnw spring-boot:run -Dspring-boot.run.profiles=postgres
+#   SPRING_PROFILES_ACTIVE=postgres java -jar target/backend-0.0.1-SNAPSHOT.jar
+#
+# Los valores por defecto coinciden con el docker-compose.yml de la raíz, así que
+# `docker compose up -d` + este perfil funciona sin definir ninguna variable.
+# ---------------------------------------------------------------------------
+
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:diagramador}
+    driver-class-name: org.postgresql.Driver
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+
+  h2:
+    console:
+      enabled: false
+
+  jpa:
+    hibernate:
+      # `update` para poder probar el esquema generado sin migraciones. En producción de
+      # verdad esto va en `validate` (ver application-prod.yml) y el esquema lo crea una
+      # herramienta de migración.
+      ddl-auto: ${JPA_DDL_AUTO:update}
+    show-sql: ${JPA_SHOW_SQL:false}
+    open-in-view: false

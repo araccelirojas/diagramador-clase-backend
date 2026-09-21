@@ -1,0 +1,31 @@
+# Postgres listo para el perfil `postgres`, para quien quiera la base real sin instalarla.
+#
+#   docker compose up -d
+#   ./mvnw spring-boot:run -Dspring-boot.run.profiles=postgres
+#
+# Los valores coinciden con los de application-postgres.yml, así que no hay que configurar
+# nada en ningún lado. Para arrancar con H2 no hace falta Docker en absoluto.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: diagramador-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-diagramador}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # La aplicación falla al arrancar si Postgres todavía no acepta conexiones; con esto
+      # `docker compose up -d --wait` no vuelve hasta que la base está lista de verdad.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-diagramador}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:

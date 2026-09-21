@@ -1,6 +1,7 @@
 const app = require('./app');
 const prisma = require('./config/prisma');
 const { aplicarMigracionesPendientes } = require('./config/migrate');
+const { crearServidorDeSockets } = require('./sockets');
 const { port, autoMigrate } = require('./config/env');
 
 async function main() {
@@ -13,6 +14,11 @@ async function main() {
   const server = app.listen(port, () => {
     console.log(`Servidor escuchando en http://localhost:${port}`);
   });
+
+  // Los sockets van sobre el mismo servidor HTTP: un solo puerto, y comparten
+  // el JWT con el REST.
+  crearServidorDeSockets(server);
+  console.log('Colaboracion en tiempo real activa');
 
   const shutdown = async () => {
     server.close();

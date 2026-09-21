@@ -5,6 +5,8 @@ const authRoutes = require('./auth.routes');
 const usuarioRoutes = require('./usuario.routes');
 const proyectoRoutes = require('./proyecto.routes');
 const invitacionRoutes = require('./invitacion.routes');
+const bocetoRoutes = require('./boceto.routes');
+const vozRoutes = require('./voz.routes');
 
 const router = Router();
 
@@ -17,5 +19,7 @@ router.use('/auth', authRoutes);
 router.use('/usuarios', auth, usuarioRoutes);
 router.use('/proyectos', auth, proyectoRoutes);
 router.use('/invitaciones', auth, invitacionRoutes);
+router.use('/boceto', auth, bocetoRoutes);
+router.use('/voz', auth, vozRoutes);
 
 module.exports = router;

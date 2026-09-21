@@ -1,0 +1,15 @@
+target/
+
+# El wrapper (.mvn/wrapper/) SI se versiona: es lo que evita exigir Maven instalado.
+
+.env
+
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+*.log
+.DS_Store

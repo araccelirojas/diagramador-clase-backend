@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# Perfil `prod` — Postgres con el esquema ya creado.
+#
+#   SPRING_PROFILES_ACTIVE=postgres,prod java -jar target/backend-0.0.1-SNAPSHOT.jar
+#
+# Se activa junto al perfil `postgres`: aquel aporta la conexión, este endurece lo demás.
+# ---------------------------------------------------------------------------
+
+spring:
+  jpa:
+    hibernate:
+      # `validate`: arranca solo si el esquema de la base coincide con las entidades, y no
+      # modifica nada. Que una aplicación altere tablas sola en producción es justo lo que
+      # no se quiere.
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+
+  h2:
+    console:
+      enabled: false
+
+logging:
+  level:
+    com.diagramador.backend: INFO
+    org.hibernate.SQL: WARN

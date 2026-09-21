@@ -15,4 +15,7 @@ router.delete('/:id', id, controller.remove);
 router.get('/:id/contenido', id, controller.cargarContenido);
 router.put('/:id/contenido', id, controller.guardarContenido);
 
+// Descarga del backend Spring Boot generado a partir del diagrama.
+router.get('/:id/exportar', id, controller.exportar);
+
 module.exports = router;

@@ -1,0 +1,68 @@
+# ---------------------------------------------------------------------------
+# Perfil por defecto: H2 en memoria.
+#
+# Todas las claves usan la forma ${VAR:valor}, y el valor por defecto está elegido para que
+# `./mvnw spring-boot:run` funcione recién clonado: sin base de datos instalada, sin Docker
+# y sin ninguna variable de entorno definida.
+# ---------------------------------------------------------------------------
+
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  # Lectura opcional de un .env en la raíz del proyecto. El prefijo `optional:` es lo que
+  # hace que su ausencia no rompa nada, y `[.properties]` le dice a Spring cómo parsearlo
+  # (el fichero no tiene extensión reconocible). Las variables de entorno reales tienen
+  # prioridad sobre lo que ponga aquí.
+  config:
+    import: optional:file:./.env[.properties]
+
+  application:
+    name: ${APP_NAME:backend}
+
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:default}
+
+  datasource:
+    # DB_CLOSE_DELAY=-1 mantiene viva la base mientras viva la JVM; sin eso, H2 la destruye
+    # al cerrarse la última conexión y las tablas desaparecen entre peticiones.
+    url: ${DB_URL:jdbc:h2:mem:diagramador;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE}
+    driver-class-name: org.h2.Driver
+    username: ${DB_USER:sa}
+    password: ${DB_PASSWORD:}
+
+  h2:
+    console:
+      enabled: ${H2_CONSOLE:true}
+      path: /h2-console
+
+  jpa:
+    hibernate:
+      ddl-auto: ${JPA_DDL_AUTO:update}
+    show-sql: ${JPA_SHOW_SQL:false}
+    properties:
+      hibernate:
+        format_sql: true
+    # false a propósito. Con open-in-view=true la sesión de Hibernate sigue abierta mientras
+    # se serializa la respuesta: una colección perezosa se carga sola durante el render y el
+    # N+1 (o el LazyInitializationException) aparece lejos de la consulta que lo causó. Con
+    # false, si algo falta se rompe dentro del servicio, que es donde se puede arreglar.
+    open-in-view: false
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+# Orígenes permitidos por CORS, separados por comas. Por defecto, el dev server de Vite.
+app:
+  cors:
+    origins: ${CORS_ORIGINS:http://localhost:5173}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    com.diagramador.backend: ${LOG_LEVEL:INFO}

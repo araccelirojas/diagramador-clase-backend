@@ -1,4 +1,5 @@
 const service = require('../services/proyecto.service');
+const exportacion = require('../export');
 
 async function list(req, res, next) {
   try {
@@ -51,6 +52,25 @@ async function cargarContenido(req, res, next) {
   }
 }
 
+// GET /proyectos/:id/exportar -> zip con el backend Spring Boot generado
+async function exportar(req, res, next) {
+  try {
+    const proyecto = await service.getById(req.params.id, req.usuario.idUsuario);
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${exportacion.nombreDeArchivo(proyecto.nombre)}"`,
+    );
+
+    await exportacion.exportarComoZip(proyecto.contenido, res);
+  } catch (error) {
+    // Si el zip ya empezo a viajar no se puede mandar un JSON de error encima.
+    if (res.headersSent) return res.destroy();
+    next(error);
+  }
+}
+
 async function remove(req, res, next) {
   try {
     await service.remove(req.params.id, req.usuario.idUsuario);
@@ -60,4 +80,4 @@ async function remove(req, res, next) {
   }
 }
 
-module.exports = { list, getById, create, update, guardarContenido, cargarContenido, remove };
+module.exports = { list, getById, create, update, guardarContenido, cargarContenido, exportar, remove };
