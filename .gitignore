@@ -3,6 +3,7 @@ node_modules/
 .env.local
 generated/
 
-# Secretos del despliegue en AWS (los genera infra/aws-up.sh).
+# Salida de infra/aws-up.sh: los dos llevan credenciales en claro.
 .env.deploy
+credenciales-github.txt
 backups/

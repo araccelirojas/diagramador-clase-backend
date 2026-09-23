@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 #
-# Construye la imagen, la sube a ECR y la pone a correr en la instancia.
+# Construye la imagen del backend, la sube a ECR y la pone a correr en la
+# instancia.
 #
 #   ./infra/aws-deploy.sh            despliegue completo
 #   ./infra/aws-deploy.sh --logs     ademas, imprime los logs al terminar
 #
-# El mismo script lo usa el pipeline de GitHub Actions. La unica diferencia es
-# de donde salen los secretos:
+# Lo ejecuta el pipeline en cada push a main, y tambien puedes lanzarlo a mano.
+# La unica diferencia es de donde salen los secretos:
 #
 #   en tu maquina   del fichero .env.deploy
 #   en Actions      de las variables de entorno que inyectan los secretos
 #
 # Si una variable esta definida en el entorno, gana sobre el fichero: asi el
-# pipeline no necesita un .env.deploy en el repositorio.
+# pipeline no necesita ningun .env.deploy en el repositorio.
+#
+# Requisito: la infraestructura tiene que existir ya. La crea aws-up.sh.
 
 cd "$(dirname "$0")/.."
 source infra/config.sh
@@ -44,10 +47,10 @@ fi
 : "${JWT_SECRET:?falta JWT_SECRET (en $ENV_FILE o en el entorno)}"
 
 INSTANCE_ID="$(find_instance)"
-[ -n "$INSTANCE_ID" ] || die "no encuentro la instancia '$INSTANCE_NAME'. Ejecuta antes: ./infra/aws-up.sh"
+[ -n "$INSTANCE_ID" ] || die "no encuentro la instancia '$INSTANCE_NAME'. Ejecuta antes aws-up.sh"
 
 REPO_URI="$(ecr_uri)"
-[ -n "$REPO_URI" ] || die "no encuentro el repositorio ECR '$ECR_REPO'. Ejecuta antes: ./infra/aws-up.sh"
+[ -n "$REPO_URI" ] || die "no encuentro el repositorio ECR '$ECR_REPO'. Ejecuta antes aws-up.sh"
 
 # La etiqueta es el commit: si algo sale mal se sabe exactamente que hay
 # corriendo, y volver atras es apuntar al sha anterior.
@@ -66,7 +69,7 @@ awsc ecr get-login-password | docker login --username AWS --password-stdin "${RE
 
 # --platform explicito: EC2 es x86_64 y aqui se puede estar construyendo desde
 # un portatil ARM, donde el build por defecto saldria arm64 y no arrancaria.
-log "Construyendo la imagen (esto tarda unos minutos la primera vez)"
+log "Construyendo la imagen (unos minutos la primera vez)"
 docker build --platform linux/amd64 -t "$IMAGE" -t "$REPO_URI:latest" .
 
 log "Subiendo a ECR"

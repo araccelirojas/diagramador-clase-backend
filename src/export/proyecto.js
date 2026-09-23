@@ -3,6 +3,7 @@ const path = require('node:path');
 
 const { construirPlan } = require('./plan');
 const render = require('./render');
+const { renderColeccionPostman } = require('./postman');
 const nombres = require('./naming');
 
 /**
@@ -134,6 +135,20 @@ Sin instalar nada: el perfil por defecto usa H2 en memoria.
 - **Swagger UI: http://localhost:8080/swagger-ui.html**
 - Consola H2: http://localhost:8080/h2-console
 
+## Probar con Postman
+
+En \`postman/${artefactoDe(plan.nombreModelo)}.postman_collection.json\` está la colección con
+todos los endpoints. Impórtala en Postman (*Import* → el fichero) y ejecútala entera con el
+*Runner*, o petición a petición:
+
+- Las carpetas van **en orden de dependencias**: primero las clases a las que otras apuntan.
+- Cada clase tiene una variable con su clave (\`{{personaId}}\`, …) que usan su POST, sus
+  rutas y las relaciones que apuntan a ella. Se editan en la pestaña *Variables* de la
+  colección. \`{{baseUrl}}\` es \`http://localhost:8080\`.
+- Los **DELETE** están todos en la última carpeta, en orden inverso: borrar a un padre antes
+  que a sus hijos lo impide la clave foránea.
+- Cada petición comprueba su código de estado (201, 200, 204).
+
 Para Postgres, mirá \`README.md\` (el de la plantilla), que sigue valiendo.
 
 ## Lo que se generó
@@ -234,6 +249,12 @@ async function construirProyecto(documento) {
       render.renderControlador(entidad),
     );
   }
+
+  // La coleccion de Postman con todos los endpoints, lista para importar y ejecutar.
+  escribir(
+    `postman/${artefactoDe(plan.nombreModelo)}.postman_collection.json`,
+    renderColeccionPostman(plan),
+  );
 
   escribir('GENERADO.md', renderResumen(plan));
 

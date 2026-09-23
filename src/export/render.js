@@ -908,6 +908,13 @@ public class ${entidad.clase}Controller {
 
 module.exports = {
   PAQUETE,
+  // Las reglas de que campos lleva cada DTO y como es la clave. La coleccion de Postman las
+  // reutiliza en vez de copiarlas: si el request cambia, los cuerpos de ejemplo cambian con el.
+  atributosEscribibles,
+  relacionesAUno,
+  coleccionesEscribibles,
+  relacionesDeClave,
+  tipoClave,
   renderEntidad,
   renderClaveEmbebida,
   renderInterfaz,
