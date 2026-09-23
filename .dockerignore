@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+infra
+deploy
+docs
+postman
+scripts
+.github
+README.md
+*.md
+backups

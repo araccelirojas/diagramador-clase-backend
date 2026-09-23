@@ -1,0 +1,85 @@
+# Stack que corre dentro de la unica instancia EC2.
+#
+#   caddy -> lo unico expuesto a internet (80/443). Saca y renueva el
+#            certificado solo, sirve los ficheros del frontend y reenvia
+#            /api y /socket.io al backend.
+#   app   -> la imagen del backend, bajada de ECR. No publica puertos.
+#   db    -> PostgreSQL. Habla con app por la red interna de Docker y nunca
+#            sale a internet.
+#
+# La base vive en el mismo host que el servidor: la latencia de cada consulta
+# es la de un loopback, no la de un salto de red a RDS.
+#
+# El frontend NO es un servicio: es contenido estatico en el volumen `web`.
+# Lo deposita ahi el despliegue del repositorio del frontend, que arranca un
+# contenedor de un solo uso con su build dentro. Por eso los dos repositorios
+# pueden desplegar por separado sin pisarse: cada uno toca una cosa distinta.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - web:/srv:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+    depends_on:
+      - app
+
+  app:
+    image: ${APP_IMAGE}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Sobrescribe lo que venga en .env: dentro de la red de Docker la base
+      # se llama "db", no localhost.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public
+      NODE_ENV: production
+      PORT: 3000
+    depends_on:
+      db:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # app arranca aplicando migraciones: si la base no acepta conexiones
+      # todavia, el contenedor se cae en bucle. Por eso el depends_on healthy.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+  # Nombre fijo, no el que compondria Docker con el del proyecto: el script de
+  # despliegue del frontend monta este volumen por nombre, desde otro
+  # repositorio, y no puede adivinarlo.
+  web:
+    name: ${WEB_VOLUME:-diagramador_web}

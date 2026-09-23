@@ -1,0 +1,99 @@
+name: Desplegar backend
+
+# Cada push a main construye la imagen, la sube a ECR y la pone a correr en la
+# instancia EC2. El despliegue lo hace el mismo script que usas en local
+# (infra/aws-deploy.sh), asi no hay dos formas distintas de desplegar que se
+# puedan desincronizar.
+
+on:
+  push:
+    branches: [main]
+    # Cambios que no afectan a lo que corre en produccion no gastan un deploy.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'postman/**'
+  workflow_dispatch:
+
+# Dos push seguidos no pueden desplegar a la vez sobre la misma instancia.
+# Sin cancel-in-progress: cortar un deploy a medias deja el stack a medio subir.
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  # Dominio unico: la aplicacion en / y la API en /api, misma instancia.
+  APP_DOMAIN: ${{ vars.APP_DOMAIN || 'galflabs.tech' }}
+
+jobs:
+  pruebas:
+    name: Pruebas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Genera el cliente de Prisma: sin esto los require de @prisma/client
+      # fallan al cargar los modulos bajo prueba. La URL es un relleno: aqui no
+      # se conecta a nada, pero prisma.config.js exige que la variable exista.
+      - run: npx prisma generate
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci?schema=public
+
+      # Las mismas variables de relleno: src/config/env.js corta el proceso si
+      # faltan, y basta con que un test importe algo que lo arrastre.
+      - run: npm test
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci?schema=public
+          JWT_SECRET: solo-para-las-pruebas-de-ci
+
+  desplegar:
+    name: Desplegar en AWS
+    needs: pruebas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar credenciales de AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Construir, subir y desplegar
+        # Sin .env.deploy en el repositorio: aws-deploy.sh toma del entorno
+        # todas las variables que no encuentra en fichero.
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          JWT_EXPIRES_IN: ${{ vars.JWT_EXPIRES_IN || '7d' }}
+          BCRYPT_ROUNDS: ${{ vars.BCRYPT_ROUNDS || '10' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-terra' }}
+          OPENAI_VOZ_MODELO: ${{ vars.OPENAI_VOZ_MODELO || 'gpt-realtime-2.1-mini' }}
+          OPENAI_VOZ: ${{ vars.OPENAI_VOZ || 'marin' }}
+          CORS_ORIGIN: https://${{ vars.APP_DOMAIN || 'galflabs.tech' }}
+          AUTOSAVE_INTERVAL_MS: ${{ vars.AUTOSAVE_INTERVAL_MS || '15000' }}
+          # El fichero no existe en el runner; nombrarlo vacio evita que el
+          # script intente leer uno que no le corresponde.
+          ENV_FILE: .env.deploy
+        run: bash infra/aws-deploy.sh
+
+      - name: Resumen
+        if: always()
+        run: |
+          {
+            echo "### Backend"
+            echo ""
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo "- Aplicacion: https://${APP_DOMAIN}"
+            echo "- Health: https://${APP_DOMAIN}/api/health"
+          } >> "$GITHUB_STEP_SUMMARY"

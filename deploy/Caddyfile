@@ -1,0 +1,67 @@
+# Caddy pide y renueva el certificado de Let's Encrypt solo, sin ACM ni ALB.
+# Requisito: que {$APP_DOMAIN} ya resuelva a la IP publica de la instancia
+# antes de levantar este contenedor, o el desafio HTTP-01 falla.
+#
+# Un solo dominio para las dos cosas:
+#
+#   /api/*        -> el backend
+#   /socket.io/*  -> el backend (colaboracion en tiempo real)
+#   todo lo demas -> los ficheros del frontend
+#
+# Compartir origen no es solo comodidad: al no haber peticiones entre origenes
+# distintos no hay CORS que configurar, ni preflights, ni un handshake de
+# Socket.IO que pueda rechazarse por el Origin.
+
+# www redirige a la raiz en vez de servir el sitio dos veces: dos URLs con el
+# mismo contenido confunden a los buscadores y parten la sesion del navegador.
+# Requiere que www.{$APP_DOMAIN} resuelva a esta instancia; si borras ese
+# registro DNS, borra tambien este bloque o Caddy reintentara sacarle un
+# certificado indefinidamente.
+www.{$APP_DOMAIN} {
+	redir https://{$APP_DOMAIN}{uri} permanent
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	# reverse_proxy negocia el Upgrade a WebSocket sin configuracion extra.
+	# flush_interval -1 desactiva el buffer de respuesta: el agente de voz
+	# mantiene la conexion abierta durante minutos y necesita los bytes ya.
+	handle /api/* {
+		reverse_proxy app:3000 {
+			flush_interval -1
+		}
+	}
+
+	handle /socket.io/* {
+		reverse_proxy app:3000 {
+			flush_interval -1
+		}
+	}
+
+	# Vite pone un hash en el nombre de cada fichero de assets/, asi que el
+	# contenido de una URL concreta no cambia nunca: se puede cachear un ano.
+	handle /assets/* {
+		root * /srv/www
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	# El resto del SPA. index.html no lleva hash y es quien apunta a los assets
+	# nuevos: si se cachea, el navegador se queda en la version vieja para
+	# siempre. try_files reenvia las rutas de react-router al index, que si no
+	# darian 404 al recargar en /proyectos/123.
+	handle {
+		root * /srv/www
+		header Cache-Control "no-cache, must-revalidate"
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10mb
+			roll_keep 3
+		}
+	}
+}
