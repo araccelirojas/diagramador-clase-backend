@@ -38,6 +38,8 @@ function obtenerSala(idProyecto) {
       temporizador: null,
       // Resuelve el snapshot que pedimos, o null si no hay ninguno pendiente.
       esperando: null,
+      // La promesa del pedido en curso: quien pide mientras tanto espera la misma.
+      pedido: null,
     };
     salas.set(idProyecto, sala);
   }
@@ -65,22 +67,24 @@ function cerrarSala(idProyecto) {
  *
  * Con timeout: si el escritor se cae justo despues de que se le pregunte, la
  * sala no puede quedarse esperando para siempre y sin volver a guardar nunca.
+ *
+ * Dos pedidos a la vez (el autoguardado y una version de CU-05) comparten la misma
+ * respuesta: hay un solo `esperando`, y el segundo pisaria al primero.
  */
 function pedirSnapshot(io, sala, motivo, tiempoLimite = 5000) {
-  return new Promise((resolve) => {
-    const escritor = sala.escritor && io.sockets.sockets.get(sala.escritor);
+  if (sala.pedido) return sala.pedido;
 
-    if (!escritor) {
-      resolve(null);
-      return;
-    }
+  const escritor = sala.escritor && io.sockets.sockets.get(sala.escritor);
+  if (!escritor) return Promise.resolve(null);
 
+  sala.pedido = new Promise((resolve) => {
     let resuelto = false;
 
     const terminar = (valor) => {
       if (resuelto) return;
       resuelto = true;
       sala.esperando = null;
+      sala.pedido = null;
       resolve(valor);
     };
 
@@ -89,6 +93,8 @@ function pedirSnapshot(io, sala, motivo, tiempoLimite = 5000) {
 
     escritor.emit('pedir-snapshot', { motivo });
   });
+
+  return sala.pedido;
 }
 
 module.exports = {

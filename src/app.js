@@ -15,7 +15,9 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-app.use(express.json());
+// El diagrama entero viaja en el cuerpo (guardar, versiones de CU-05): con los 100 kB por
+// defecto, un diagrama mediano ya se rechazaria. El mismo tope que el socket.
+app.use(express.json({ limit: '5mb' }));
 app.use('/api', routes);
 app.use(notFound);
 app.use(errorHandler);

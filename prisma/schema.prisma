@@ -16,6 +16,9 @@ model Usuario {
 
   proyectos    Proyecto[]
   invitaciones Invitacion[]
+  mensajes     Mensaje[]    @relation("MensajeAutor")
+  menciones    Mensaje[]    @relation("MensajeMencion")
+  versiones    Version[]    @relation("VersionAutor")
 
   @@map("usuarios")
 }
@@ -30,6 +33,8 @@ model Proyecto {
   usuario   Usuario @relation(fields: [idUsuario], references: [idUsuario], onDelete: Cascade)
 
   invitaciones Invitacion[]
+  mensajes     Mensaje[]
+  versiones    Version[]
 
   @@index([idUsuario])
   @@map("proyectos")
@@ -56,4 +61,90 @@ enum EstadoInvitacion {
   PENDIENTE
   ACEPTADA
   RECHAZADA
+}
+
+// Chat de la sala (CU-02). Una conversacion por proyecto, compartida por todos los
+// que tienen acceso, con la IA como un participante mas.
+model Mensaje {
+  idMensaje String       @id @default(uuid()) @db.Uuid
+  autor     AutorMensaje
+  tipo      TipoMensaje  @default(TEXTO)
+  texto     String
+  fecha     DateTime     @default(now())
+
+  // Solo en las notas de voz (CU-03). `texto` queda vacio: lo que dice la nota esta en
+  // `transcripcion`, que es null mientras se transcribe o si no se pudo.
+  audio         String? // clave en el almacenamiento, nunca una URL publica
+  audioTipo     String? // tipo MIME, para servirlo tal cual se grabo
+  duracionMs    Int?
+  transcripcion String?
+
+  // Id que genera el cliente antes de enviar. Si el ack se pierde y el mensaje se
+  // reintenta, el servidor lo reconoce y no lo guarda dos veces.
+  idCliente String?
+
+  idProyecto String   @db.Uuid
+  proyecto   Proyecto @relation(fields: [idProyecto], references: [idProyecto], onDelete: Cascade)
+
+  // Quien lo escribio. Null en los mensajes de la IA, y si la cuenta se borro.
+  idUsuario String?  @db.Uuid
+  usuario   Usuario? @relation("MensajeAutor", fields: [idUsuario], references: [idUsuario], onDelete: SetNull)
+
+  // Solo en las respuestas de la IA: la pregunta que contesta y a quien.
+  respondeA  String?   @db.Uuid
+  pregunta   Mensaje?  @relation("Respuesta", fields: [respondeA], references: [idMensaje], onDelete: SetNull)
+  respuestas Mensaje[] @relation("Respuesta")
+
+  mencionA   String?  @db.Uuid
+  mencionado Usuario? @relation("MensajeMencion", fields: [mencionA], references: [idUsuario], onDelete: SetNull)
+
+  @@unique([idUsuario, idCliente])
+  // La pagina del chat: los de un proyecto, del mas nuevo al mas viejo.
+  @@index([idProyecto, fecha])
+  @@map("mensajes")
+}
+
+enum AutorMensaje {
+  USUARIO
+  IA
+}
+
+// VOZ la usa CU-03.
+enum TipoMensaje {
+  TEXTO
+  VOZ
+}
+
+/// Una foto del diagrama (CU-05). El contenido es el mismo objeto que `Proyecto.contenido`.
+model Version {
+  idVersion  String        @id @default(uuid()) @db.Uuid
+  /// Correlativo por proyecto: "versión 12" se lee mejor que un uuid.
+  numero     Int
+  origen     OrigenVersion
+  nombre     String?
+  contenido  Json
+  /// Huella de clases y relaciones, para no guardar dos automáticas iguales seguidas.
+  huella     String
+  clases     Int           @default(0)
+  relaciones Int           @default(0)
+  fecha      DateTime      @default(now())
+
+  idProyecto String   @db.Uuid
+  proyecto   Proyecto @relation(fields: [idProyecto], references: [idProyecto], onDelete: Cascade)
+
+  idUsuario String?  @db.Uuid
+  usuario   Usuario? @relation("VersionAutor", fields: [idUsuario], references: [idUsuario], onDelete: SetNull)
+
+  @@unique([idProyecto, numero])
+  @@index([idProyecto, fecha])
+  @@map("versiones")
+}
+
+enum OrigenVersion {
+  MANUAL
+  AUTOMATICA
+  /// Un cambio de la IA que la sala votó conservar (CU-04).
+  IA
+  /// El diagrama tal como estaba justo antes de restaurar otra versión.
+  RESTAURACION
 }
