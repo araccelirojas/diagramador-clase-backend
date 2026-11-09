@@ -1,4 +1,4 @@
-# diagramador-backend
+# diagramador-backend 
 
 API REST con Node.js + Express + PostgreSQL (Prisma), autenticacion JWT y
 passwords hasheadas con bcrypt. Organizada en capas.
