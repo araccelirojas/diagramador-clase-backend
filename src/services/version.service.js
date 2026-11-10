@@ -3,6 +3,7 @@ const { createHash } = require('node:crypto');
 const repository = require('../repositories/version.repository');
 const proyectoService = require('./proyecto.service');
 const emisor = require('../sockets/emisor');
+const mensajeService = require('./mensaje.service');
 const votaciones = require('../votacion');
 const AppError = require('../utils/AppError');
 const { requiereUuid } = require('../utils/validators');
@@ -138,9 +139,15 @@ async function guardarManual(idProyecto, idUsuario, body = {}) {
  *
  * Bloqueado mientras la sala vota un cambio de la IA: restaurar se llevaria puesto el
  * cambio provisional, y la votacion seguiria abierta sobre algo que ya no existe.
+ *
+ * La restauracion queda registrada en el chat (CU11): quien llegue despues, y la IA en su
+ * historial, saben que el diagrama volvio atras y desde donde se puede recuperar.
  */
 async function restaurar(idProyecto, idVersion, idUsuario, body = {}, deps = {}) {
-  const { votacionAbierta = (id) => votaciones.abierta(id) !== null } = deps;
+  const {
+    votacionAbierta = (id) => votaciones.abierta(id) !== null,
+    registrarEnChat = registrarRestauracion,
+  } = deps;
 
   await proyectoService.getById(idProyecto, idUsuario);
 
@@ -163,7 +170,30 @@ async function restaurar(idProyecto, idVersion, idUsuario, body = {}, deps = {})
     idUsuario,
   });
 
+  try {
+    await registrarEnChat(idProyecto, { version, respaldo });
+  } catch (error) {
+    // El chat es el registro, no la restauracion: un fallo aca no la deshace.
+    console.error('Version: no se pudo registrar la restauracion en el chat:', error.message);
+  }
+
   return { version, respaldo };
+}
+
+/** El texto que deja una restauracion en el chat. */
+function textoDeRestauracion({ version, respaldo }) {
+  const quien = respaldo.usuario ? respaldo.usuario.nombre : 'Alguien';
+  const cual = version.nombre ? `la versión ${version.numero} (${version.nombre})` : `la versión ${version.numero}`;
+  return `${quien} restauró ${cual}. Lo que había antes quedó guardado como versión ${respaldo.numero}.`;
+}
+
+async function registrarRestauracion(idProyecto, datos) {
+  const mensaje = await mensajeService.guardarRespuestaIA(idProyecto, {
+    texto: textoDeRestauracion(datos),
+    respondeA: null,
+    mencionA: null,
+  });
+  emisor.emitirASala(idProyecto, 'mensaje', mensaje);
 }
 
 /* Lo que pasa solo ------------------------------------------------------ */
@@ -209,4 +239,5 @@ module.exports = {
   crear,
   huellaDe,
   contar,
+  textoDeRestauracion,
 };

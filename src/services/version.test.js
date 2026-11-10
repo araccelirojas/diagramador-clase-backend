@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { automatica, crear, huellaDe, contar } = require('./version.service');
+const { automatica, crear, huellaDe, contar, textoDeRestauracion } = require('./version.service');
 const { pedirSnapshot } = require('../sockets/salas');
 const { versionAutoMs } = require('../config/env');
 
@@ -103,4 +103,13 @@ test('pedirSnapshot: dos pedidos a la vez reciben la misma respuesta', async () 
   const sinNadie = { escritor: null, esperando: null, pedido: null };
   assert.equal(await pedirSnapshot(io, sinNadie, 'x'), null);
   assert.equal(sinNadie.pedido, null);
+});
+
+test('textoDeRestauracion: quien, que version y donde quedo lo anterior', () => {
+  const texto = textoDeRestauracion({
+    version: { numero: 2, nombre: 'Entrega 1' },
+    respaldo: { numero: 7, usuario: { nombre: 'Ana' } },
+  });
+  assert.equal(texto, 'Ana restauró la versión 2 (Entrega 1). Lo que había antes quedó guardado como versión 7.');
+  assert.match(textoDeRestauracion({ version: { numero: 3, nombre: null }, respaldo: { numero: 8, usuario: null } }), /^Alguien restauró la versión 3\./);
 });

@@ -68,13 +68,13 @@ test('decidir: en un empate desempata quien pidio el cambio', () => {
   assert.deepEqual(v.decidir(votacion), { estado: 'conservada', motivo: 'desempate' });
 });
 
-test('decidir: empate sin el voto de quien pidio, o sin votos, se descarta', () => {
+test('decidir: empate sin el voto de quien pidio se descarta; sin ningun voto se conserva', () => {
   const empate = nueva(caro);
   v.registrarVoto(empate, ana, 'conservar');
   v.registrarVoto(empate, beto, 'descartar');
   assert.deepEqual(v.decidir(empate), { estado: 'descartada', motivo: 'desempate' });
 
-  assert.deepEqual(v.decidir(nueva()), { estado: 'descartada', motivo: 'sin-votos' });
+  assert.deepEqual(v.decidir(nueva()), { estado: 'conservada', motivo: 'sin-votos' });
 });
 
 test('registrarVoto: se puede cambiar el voto, no repetirlo, y no despues de cerrar', () => {
@@ -177,7 +177,10 @@ test('gestor: una sola votacion por sala, y un voto a una cerrada se rechaza', a
 test('gestor: con la sala vacia la reversion queda pendiente para el proximo que entre', async () => {
   salaFalsa([]);
   await votaciones.abrir('proy-5', { idPropuesta: 'p5', solicitante: ana, cambios: [], nodos: [], aristas: [], reversion });
-  await votaciones.cerrar('proy-5', 'p5'); // el reloj, sin votos: se descarta
+  // Ana voto descartar y se fue; con la sala vacia la votacion espera al reloj.
+  await votaciones.votar('proy-5', ana, 'descartar', 'p5');
+  assert.notEqual(votaciones.abierta('proy-5'), null);
+  await votaciones.cerrar('proy-5', 'p5');
 
   assert.deepEqual(votaciones.tomarReversionPendiente('proy-5'), reversion);
   assert.equal(votaciones.tomarReversionPendiente('proy-5'), null);

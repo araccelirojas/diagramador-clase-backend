@@ -7,7 +7,8 @@
  *   - Cierra a los 2 minutos, o antes si ya votaron todos los presentes.
  *   - Gana la mayoria de los votos emitidos.
  *   - Empate: desempata quien pidio el cambio; si no voto, se descarta.
- *   - Sin ningun voto se descarta: nadie confirmo el cambio, y confirmar es el punto.
+ *   - Sin ningun voto se conserva (CU10 del documento de requisitos): nadie se opuso, y el
+ *     cambio ya esta en el diagrama de todos.
  */
 
 const DURACION_MS = 2 * 60 * 1000;
@@ -79,7 +80,7 @@ function conteo(votacion) {
 function decidir(votacion) {
   const { favor, contra } = conteo(votacion);
 
-  if (favor === 0 && contra === 0) return { estado: 'descartada', motivo: 'sin-votos' };
+  if (favor === 0 && contra === 0) return { estado: 'conservada', motivo: 'sin-votos' };
   if (favor > contra) return { estado: 'conservada', motivo: 'mayoria' };
   if (contra > favor) return { estado: 'descartada', motivo: 'mayoria' };
 
@@ -115,7 +116,7 @@ function textoDelResultado(votacion) {
   const desempate = votacion.motivo === 'desempate' ? '; desempató quien pidió el cambio' : '';
 
   if (votacion.motivo === 'sin-votos') {
-    return 'Votación cerrada sin votos: se descartaron mis cambios al diagrama.';
+    return 'Votación cerrada sin votos: nadie se opuso, así que se conservan mis cambios al diagrama.';
   }
 
   return votacion.estado === 'conservada'
