@@ -24,4 +24,12 @@ async function perfil(req, res, next) {
   }
 }
 
-module.exports = { registro, login, perfil };
+async function completarOnboarding(req, res, next) {
+  try {
+    res.json(await service.completarOnboarding(req.usuario.idUsuario));
+  } catch (error) {
+    next(error);
+  }
+}
+
+module.exports = { registro, login, perfil, completarOnboarding };

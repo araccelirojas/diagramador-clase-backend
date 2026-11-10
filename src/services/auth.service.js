@@ -50,4 +50,15 @@ async function perfil(idUsuario) {
   return usuario;
 }
 
-module.exports = { registro, login, perfil };
+// El id procede exclusivamente de la sesión autenticada, nunca del cuerpo de la petición.
+// Idempotente: repetir la guía no puede volver a dejar el estado en false.
+async function completarOnboarding(idUsuario, repository = usuarioRepository) {
+  const usuario = await repository.findById(idUsuario);
+  if (!usuario) throw new AppError('Usuario no encontrado', 404);
+  if (!usuario.estado) throw new AppError('La cuenta esta desactivada', 403);
+  if (usuario.onboardingCompletado) return usuario;
+
+  return repository.update(idUsuario, { onboardingCompletado: true });
+}
+
+module.exports = { registro, login, perfil, completarOnboarding };

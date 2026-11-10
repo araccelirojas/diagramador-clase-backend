@@ -13,6 +13,7 @@ model Usuario {
   password      String
   fechaRegistro DateTime @default(now())
   estado        Boolean  @default(true)
+  onboardingCompletado Boolean @default(false)
 
   proyectos    Proyecto[]
   invitaciones Invitacion[]

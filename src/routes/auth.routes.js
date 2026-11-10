@@ -7,5 +7,6 @@ const router = Router();
 router.post('/registro', controller.registro);
 router.post('/login', controller.login);
 router.get('/perfil', auth, controller.perfil);
+router.patch('/onboarding', auth, controller.completarOnboarding);
 
 module.exports = router;

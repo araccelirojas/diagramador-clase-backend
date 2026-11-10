@@ -7,6 +7,7 @@ const publicFields = {
   correo: true,
   fechaRegistro: true,
   estado: true,
+  onboardingCompletado: true,
 };
 
 async function findAll() {
