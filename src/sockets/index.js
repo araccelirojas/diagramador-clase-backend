@@ -25,6 +25,8 @@ const {
   pedirSnapshot,
 } = require('./salas');
 const { normalizarEfimero, presenciaInicial, recordar, participanteDe } = require('./presencia');
+const { registrarLlamada } = require('../llamada');
+const llamadas = require('../llamada/llamadas');
 
 /**
  * Colaboracion en tiempo real.
@@ -104,6 +106,11 @@ function registrar(io, socket) {
   // Para el contexto de la IA (CU-02): el nombre del proyecto sin otra consulta.
   let nombreProyectoActual = null;
 
+  // La llamada de voz grupal y Jarvis (ver `llamada/index.js`).
+  const llamada = registrarLlamada(io, socket, () =>
+    idProyectoActual ? { idProyecto: idProyectoActual, nombreProyecto: nombreProyectoActual } : null,
+  );
+
   /**
    * `motivo` le dice a los demas si la persona se fue (cerro el editor, cambio
    * de proyecto) o se le corto la conexion. En el segundo caso la muestran como
@@ -116,6 +123,8 @@ function registrar(io, socket) {
     const nombre = nombreDeSala(idProyectoActual);
 
     socket.leave(nombre);
+    // Fuera de la sala no se puede seguir en su llamada.
+    llamada.alSalirDeSala(idProyectoActual);
     socket.to(nombre).emit('salio', {
       idSocket: socket.id,
       idUsuario: idDeSocket(socket),
@@ -186,6 +195,8 @@ function registrar(io, socket) {
         // tuvo a quien llegar. Solo a quien entra solo: si hay alguien, ya la recibio.
         votacion: votaciones.estadoPublico(idProyectoActual, await usuariosEnSala(idProyectoActual)),
         reversion: soloYo ? votaciones.tomarReversionPendiente(idProyectoActual) : null,
+        // Quien esta en la llamada de voz, para ofrecer unirse.
+        llamada: llamadas.participantes(idProyectoActual),
       });
 
       // Uno mas que puede votar: los demas lo ven entre los que faltan.

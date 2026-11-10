@@ -147,13 +147,16 @@ REMOTE
 # 5. Comprobar que responde
 # ---------------------------------------------------------------------------
 log "Comprobando https://$APP_DOMAIN/api/health"
+RESPUESTA="$(mktemp)"
 for intento in $(seq 1 30); do
-  if curl -fsS --max-time 10 "https://$APP_DOMAIN/api/health" 2>/dev/null | grep -q '"ok"'; then
+  # Sin pipe a grep: asi se ve el codigo HTTP o el error de curl de cada intento.
+  codigo="$(curl -sS --max-time 10 -o "$RESPUESTA" -w '%{http_code}' "https://$APP_DOMAIN/api/health" 2>"$RESPUESTA.err" || true)"
+  if [ "$codigo" = "200" ] && grep -q '"ok"' "$RESPUESTA"; then
     ok "la API responde en https://$APP_DOMAIN/api"
     if [ "$MOSTRAR_LOGS" = "1" ]; then ./infra/logs.sh; fi
     exit 0
   fi
-  skip "intento $intento/30, reintento en 10s (la primera vez Caddy tarda en emitir el certificado)"
+  skip "intento $intento/30: HTTP ${codigo:-000} $(head -c 160 "$RESPUESTA.err" | tr '\n' ' ')- reintento en 10s (la primera vez Caddy tarda en emitir el certificado)"
   sleep 10
 done
 

@@ -5,6 +5,7 @@ const {
   vozModelo,
   vozVoz,
   openaiTimeoutMs,
+  llamadaTranscripcionModelo,
 } = require('../config/env');
 
 /**
@@ -32,27 +33,12 @@ function comprobarConfiguracion() {
 }
 
 /**
- * @returns {Promise<{ valor: string, expiraEn: number, modelo: string }>}
+ * Pide a OpenAI el token efimero para una sesion. Comun a las dos sesiones de abajo.
+ *
+ * @returns {Promise<{ valor: string, expiraEn: number }>}
  */
-async function crearSesionDeVoz() {
+async function pedirSecreto(session) {
   comprobarConfiguracion();
-
-  const cuerpo = {
-    session: {
-      type: 'realtime',
-      model: vozModelo,
-      instructions: INSTRUCCIONES,
-      audio: {
-        input: {
-          // El modelo decide cuando el usuario termino de hablar. Es lo que permite
-          // interrumpirlo a media frase sin pulsar nada.
-          turn_detection: { type: 'semantic_vad', interrupt_response: true },
-          transcription: { model: 'whisper-1', language: 'es' },
-        },
-        output: { voice: vozVoz },
-      },
-    },
-  };
 
   let respuesta;
 
@@ -63,7 +49,7 @@ async function crearSesionDeVoz() {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${openaiApiKey}`,
       },
-      body: JSON.stringify(cuerpo),
+      body: JSON.stringify({ session }),
       signal: AbortSignal.timeout(openaiTimeoutMs),
     });
   } catch (error) {
@@ -98,9 +84,31 @@ async function crearSesionDeVoz() {
     throw new AppError('OpenAI devolvió una sesión sin credencial utilizable.', 502);
   }
 
+  return { valor, expiraEn: (datos && datos.expires_at) || 0 };
+}
+
+/**
+ * @returns {Promise<{ valor: string, expiraEn: number, modelo: string }>}
+ */
+async function crearSesionDeVoz() {
+  const { valor, expiraEn } = await pedirSecreto({
+    type: 'realtime',
+    model: vozModelo,
+    instructions: INSTRUCCIONES,
+    audio: {
+      input: {
+        // El modelo decide cuando el usuario termino de hablar. Es lo que permite
+        // interrumpirlo a media frase sin pulsar nada.
+        turn_detection: { type: 'semantic_vad', interrupt_response: true },
+        transcription: { model: 'whisper-1', language: 'es' },
+      },
+      output: { voice: vozVoz },
+    },
+  });
+
   return {
     valor,
-    expiraEn: (datos && datos.expires_at) || 0,
+    expiraEn,
     modelo: vozModelo,
     /**
      * Las instrucciones viajan tambien al frontend.
@@ -115,4 +123,36 @@ async function crearSesionDeVoz() {
   };
 }
 
-module.exports = { crearSesionDeVoz };
+/**
+ * La sesion con la que cada navegador de la llamada grupal escucha SU microfono para
+ * saber cuando alguien dice "Jarvis".
+ *
+ * Es una sesion de tiempo real que nunca responde: `create_response: false` y solo texto.
+ * Lo unico que se usa de ella es la transcripcion de cada frase, con la deteccion de voz
+ * del lado de OpenAI. Quien contesta es la IA del chat, en el servidor. El nombre va como
+ * pista para el transcriptor: sin ella, "Jarvis" sale escrito de mil maneras.
+ *
+ * @returns {Promise<{ valor: string, expiraEn: number }>}
+ */
+async function crearSesionDeEscucha() {
+  return pedirSecreto({
+    type: 'realtime',
+    model: vozModelo,
+    output_modalities: ['text'],
+    instructions: 'Solo transcribís. No respondas nunca.',
+    audio: {
+      input: {
+        noise_reduction: { type: 'near_field' },
+        transcription: { model: llamadaTranscripcionModelo, language: 'es', prompt: 'Jarvis' },
+        turn_detection: {
+          type: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+          silence_duration_ms: 700,
+        },
+      },
+    },
+  });
+}
+
+module.exports = { crearSesionDeVoz, crearSesionDeEscucha };

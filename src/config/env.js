@@ -60,4 +60,19 @@ module.exports = {
   versionesAutoMax: Number(process.env.VERSIONES_AUTO_MAX || 50),
   // Aplica las migraciones pendientes al arrancar. AUTO_MIGRATE=false lo desactiva.
   autoMigrate: process.env.AUTO_MIGRATE !== 'false',
+
+  // Llamada de voz grupal con Jarvis. Cada navegador transcribe su propio microfono para
+  // oir cuando alguien dice "Jarvis"; este es el modelo de esa transcripcion.
+  llamadaTranscripcionModelo:
+    process.env.OPENAI_LLAMADA_TRANSCRIPCION_MODEL || 'gpt-4o-mini-transcribe',
+  // Opcional: un servidor TURN para quienes esten detras de redes que bloquean la conexion
+  // directa entre navegadores (algunas redes moviles o de universidad). Sin el, se usa
+  // solo STUN, que alcanza en la mayoria de las redes domesticas.
+  llamadaTurn: process.env.LLAMADA_TURN_URL
+    ? {
+        urls: process.env.LLAMADA_TURN_URL,
+        username: process.env.LLAMADA_TURN_USUARIO || '',
+        credential: process.env.LLAMADA_TURN_CLAVE || '',
+      }
+    : null,
 };

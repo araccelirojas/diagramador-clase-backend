@@ -13,6 +13,8 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 
 # Dominio unico: la aplicacion en / y la API en /api, misma instancia.
 APP_DOMAIN="${APP_DOMAIN:-}"  # lo genera infra/aws-up.sh (secreto APP_DOMAIN)
+# Tolera un secreto pegado con espacios, con https:// delante o con / al final.
+APP_DOMAIN="$(printf '%s' "$APP_DOMAIN" | tr -d '[:space:]' | sed -E 's#^https?://##; s#/+$##')"
 
 ECR_REPO="${ECR_REPO:-${STACK}-backend}"
 INSTANCE_NAME="${INSTANCE_NAME:-${STACK}}"

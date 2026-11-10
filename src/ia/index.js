@@ -53,11 +53,23 @@ function leerDiagrama(diagrama) {
  * @param {() => Promise<string[]>} [p.participantes]  quien esta en la sala al responder
  * @param {(evento: string, datos: object) => void} p.emitir  a toda la sala
  * @param {boolean} [p.enVoz]  le preguntaron por voz (CU-03): responde con una nota de voz
+ * @param {boolean} [p.enLlamada]  se lo dijeron a Jarvis en la llamada de voz grupal: la
+ *   respuesta suena para todos los que estan en la llamada
  * @param {object} [p.cambios]  ver `votacion.cambiosPara`; sin esto, la IA solo conversa
  * @param {object} [deps]  para los tests
  */
 async function responderPregunta(
-  { idProyecto, pregunta, diagrama, nombreProyecto, participantes, emitir, enVoz = false, cambios = null },
+  {
+    idProyecto,
+    pregunta,
+    diagrama,
+    nombreProyecto,
+    participantes,
+    emitir,
+    enVoz = false,
+    enLlamada = false,
+    cambios = null,
+  },
   deps = {},
 ) {
   const {
@@ -96,6 +108,7 @@ async function responderPregunta(
           resumen,
           exportador: resumirExportacion(contenido),
           modoCambios,
+          enLlamada,
         });
 
         const texto =

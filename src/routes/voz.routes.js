@@ -5,5 +5,6 @@ const controller = require('../controllers/voz.controller');
 const router = Router();
 
 router.post('/sesion', controller.sesion);
+router.post('/escucha', controller.escucha);
 
 module.exports = router;

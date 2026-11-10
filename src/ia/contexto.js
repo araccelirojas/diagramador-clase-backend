@@ -85,6 +85,7 @@ function bloqueContexto({ nombreProyecto, participantes, resumen, exportador, mo
  * @param {string}   [p.resumen]  `resumirDiagrama()` del cliente que pregunta
  * @param {string}   [p.exportador]  ver `exportador.js`
  * @param {'disponible' | 'votacion' | null} [p.modoCambios]  CU-04
+ * @param {boolean} [p.enLlamada]  se lo dijeron a Jarvis en la llamada de voz grupal
  */
 function construirMensajes({
   historial,
@@ -94,10 +95,26 @@ function construirMensajes({
   resumen,
   exportador,
   modoCambios = null,
+  enLlamada = false,
 }) {
   const previos = historial
     .filter((mensaje) => mensaje.idMensaje !== pregunta.idMensaje)
     .slice(-MAX_HISTORIAL);
+
+  if (enLlamada) {
+    return [
+      { role: 'system', content: INSTRUCCIONES },
+      {
+        role: 'system',
+        content: bloqueContexto({ nombreProyecto, participantes, resumen, exportador, modoCambios }),
+      },
+      ...previos.map(aTurno),
+      {
+        role: 'user',
+        content: `${nombreDe(pregunta)} te habla en la llamada de voz (te llaman Jarvis): ${pregunta.texto}`,
+      },
+    ];
+  }
 
   return [
     { role: 'system', content: INSTRUCCIONES },
