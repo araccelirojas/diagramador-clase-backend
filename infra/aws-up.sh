@@ -1,877 +1,713 @@
 #!/usr/bin/env bash
 #
-# Crea desde cero toda la infraestructura del diagramador en AWS y deja un
-# fichero con TODO lo que hay que pegar en los secretos de GitHub.
+# Levanta en AWS todo lo que necesitan el backend y el frontend para correr y,
+# si termina bien, deja infra/secretos-github.txt con los secretos que van en
+# cada repositorio de GitHub (nombre y valor), para que los pipelines
+# desplieguen solos en cada push a main.
 #
-#   ./aws-up.sh                  crea todo
-#   ./aws-up.sh --rotar-claves   ademas, genera una access key nueva para el CI
-#   ./aws-up.sh --esperar-dns    ademas, espera a que el dominio resuelva
+#   ./infra/aws-up.sh
 #
-# SOLO infraestructura: no compila, no construye imagenes y no despliega. De
-# eso se encargan los pipelines. Por eso este fichero no depende del codigo de
-# ninguna de las dos aplicaciones, ni de ningun otro script: es autocontenido,
-# lo puedes dejar donde quieras y lo unico que necesita es la CLI de AWS.
+# Es secuencial: muestra cada paso y, si uno falla (o lo cortas con Ctrl+C),
+# se detiene, dice en que paso fallo y borra todo lo que esta ejecucion
+# alcanzo a crear. La cuenta queda como estaba.
 #
-# Lo que construye:
+# Lo que crea, en este orden:
 #
-#   ECR          dos repositorios, uno por imagen (backend y frontend)
-#   IAM          rol de la instancia (SSM + lectura de ECR) y su perfil
-#   IAM          usuario de CI con su access key y una politica que solo le
-#                deja desplegar en ESTA instancia
-#   SG           80 y 443 abiertos; el 22 cerrado, se entra por SSM
-#   Elastic IP   IP fija, para que el registro DNS no cambie al reiniciar
-#   EC2          una instancia con Docker, Docker Compose y 2 GB de swap
-#   Route 53     los registros, SOLO si el dominio esta alojado ahi
+#   ECR         dos repositorios de imagenes: backend y frontend
+#   IAM         rol y perfil de la instancia (SSM y lectura de ECR)
+#   SG          puertos 80 y 443 abiertos; sin 22, se entra por SSM
+#   Elastic IP  IP fija
+#   EC2         t3.micro con Docker, Docker Compose y 2 GB de swap
+#   IAM         usuario del CI con su access key; solo puede desplegar
 #
-# Deja dos ficheros junto a si mismo:
+# La aplicacion no se instala aqui: la despliegan los pipelines en cada push.
+# En la instancia corren Caddy (HTTPS), la API, PostgreSQL y el build del
+# frontend, todo bajo el mismo dominio.
 #
-#   .env.deploy                secretos de la aplicacion
-#   credenciales-github.txt    todo lo que va en GitHub, listo para copiar
+# Dominio: por defecto <ip>.sslip.io, que ya resuelve a la IP de la instancia
+# y tiene HTTPS sin tocar ningun DNS. Para usar un dominio propio:
 #
-# Los dos contienen credenciales en claro. No los subas a git.
+#   APP_DOMAIN=midominio.com ./infra/aws-up.sh
 #
-# Es idempotente: si algo falla a la mitad, vuelve a lanzarlo y solo crea lo
-# que falte. La instancia queda vacia, con Docker y nada mas: quien la llena
-# es el primer push a main.
+# y apunta su registro A a la IP que imprime el script antes del primer deploy.
+#
+# Requisitos: AWS CLI v2 con sesion iniciada (aws login o aws configure).
+# En Windows, ejecutalo desde Git Bash.
 
-set -euo pipefail
+set -Eeuo pipefail
+
+# Git Bash convierte los argumentos que empiezan por / en rutas de Windows y
+# romperia cosas como /aws/service/... o 0.0.0.0/0.
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' AWS_PAGER=''
 
 # ===========================================================================
 # CONFIGURACION
 # ===========================================================================
-# Todo se puede sobrescribir desde el entorno:
-#   AWS_REGION=sa-east-1 APP_DOMAIN=otro.com ./aws-up.sh
-#
-# Si cambias PROJECT, AWS_REGION, APP_DOMAIN o WEB_VOLUME, cambialos tambien
-# en el infra/config.sh de los dos repositorios: los scripts de despliegue
-# localizan los recursos por estos mismos nombres.
-
-PROJECT="${PROJECT:-diagramador}"
-STACK="${STACK:-${PROJECT}}"
-
-# us-east-1 es la region mas barata. sa-east-1 (Sao Paulo) puede bajar la
-# latencia desde Sudamerica a cambio de un 20-30% mas de factura.
+PROJECT="diagramador"
 AWS_REGION="${AWS_REGION:-us-east-1}"
-
-# Dominio unico: la aplicacion en / y la API en /api, sobre la misma instancia.
-APP_DOMAIN="${APP_DOMAIN:-galflabs.tech}"
-
-# t3.micro entra en la capa gratuita (750 h/mes el primer ano) y aguanta el
-# stack gracias a los 2 GB de swap que monta el user-data.
 INSTANCE_TYPE="${INSTANCE_TYPE:-t3.micro}"
-ROOT_VOLUME_GB="${ROOT_VOLUME_GB:-30}"
+DISK_GB="${DISK_GB:-20}"
+APP_DOMAIN="${APP_DOMAIN:-}"
 
-# Nombres derivados. Normalmente no hace falta tocarlos.
-ECR_REPO="${ECR_REPO:-${STACK}-backend}"
-ECR_REPO_FRONTEND="${ECR_REPO_FRONTEND:-${STACK}-frontend}"
-SG_NAME="${SG_NAME:-${STACK}-sg}"
-ROLE_NAME="${ROLE_NAME:-${STACK}-ec2-role}"
-PROFILE_NAME="${PROFILE_NAME:-${STACK}-ec2-profile}"
-INSTANCE_NAME="${INSTANCE_NAME:-${STACK}}"
-CI_USER="${CI_USER:-${STACK}-ci}"
-CI_POLICY="${CI_POLICY:-${STACK}-ci-deploy}"
+GH_REPO_BACKEND="araccelirojas/diagramador-clase-backend"
+GH_REPO_FRONTEND="araccelirojas/diagramador-clase-frontend"
 
-# Volumen de Docker donde el pipeline del frontend deja su build.
-WEB_VOLUME="${WEB_VOLUME:-${PROJECT}_web}"
+# Los scripts de despliegue (infra/config.sh de cada repositorio) buscan los
+# recursos por estos nombres: no los cambies solo aqui.
+ECR_BACKEND="$PROJECT-backend"
+ECR_FRONTEND="$PROJECT-frontend"
+ROLE_NAME="$PROJECT-ec2-role"
+PROFILE_NAME="$PROJECT-ec2-profile"
+SG_NAME="$PROJECT-sg"
+INSTANCE_NAME="$PROJECT"
+CI_USER="$PROJECT-ci"
+CI_POLICY="$PROJECT-ci-deploy"
+TAG="Key=Project,Value=$PROJECT"
 
-# PostgreSQL vive dentro de la instancia y no sale a internet.
-POSTGRES_USER="${POSTGRES_USER:-diagramador}"
-POSTGRES_DB="${POSTGRES_DB:-diagramador}"
-
-# Directorio de la instancia donde el pipeline dejara el stack.
-REMOTE_DIR="${REMOTE_DIR:-/opt/${PROJECT}}"
-
-# Repositorios de GitHub, para los comandos de `gh` del fichero final.
-GH_REPO_BACKEND="${GH_REPO_BACKEND:-araccelirojas/diagramador-clase-backend}"
-GH_REPO_FRONTEND="${GH_REPO_FRONTEND:-araccelirojas/diagramador-clase-frontend}"
-
-# Los ficheros de salida van junto a este script, no en el directorio desde el
-# que lo lanzas: asi siempre sabes donde quedaron.
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${ENV_FILE:-$DIR/.env.deploy}"
-OUT_FILE="${OUT_FILE:-$DIR/credenciales-github.txt}"
+OUT_FILE="$DIR/secretos-github.txt"
+TMP_DIR="$(mktemp -d)"
 
-TAG_KEY="Project"
-TAG_VALUE="$STACK"
+# La terminal de verdad, guardada: si falla un comando con la salida a
+# /dev/null, el aviso del fallo y el rollback tienen que verse igual.
+exec 3>&1 4>&2
 
 # ===========================================================================
-# UTILIDADES
+# PANTALLA
 # ===========================================================================
-
 if [ -t 1 ]; then
-  C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_RED=$'\033[31m'
-  C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'
+  R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; B=$'\033[1;34m'; D=$'\033[2m'; N=$'\033[0m'
 else
-  C_RESET=''; C_DIM=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''
+  R=''; G=''; Y=''; B=''; D=''; N=''
 fi
 
-log()  { printf '%s==>%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
-ok()   { printf '%s  ok%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
-skip() { printf '%s  ..%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
-warn() { printf '%s  !!%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
-die()  { printf '%serror%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+TOTAL=16
+PASO=0
+PASO_DESC="antes de empezar"
 
-need() { command -v "$1" >/dev/null 2>&1 || die "falta el comando '$1'. ${2:-}"; }
+paso()  { PASO=$((PASO + 1)); PASO_DESC="$1"; printf '\n%s[%2d/%d]%s %s\n' "$B" "$PASO" "$TOTAL" "$N" "$1"; }
+ok()    { printf '        %sok%s %s\n' "$G" "$N" "$*"; }
+info()  { printf '        %s%s%s\n' "$D" "$*" "$N"; }
+falla() { printf '        %s%s%s\n' "$R" "$*" "$N" >&2; exit 1; }
 
-# Todas las llamadas a AWS pasan por aqui para no repetir la region.
-awsc() { aws --region "$AWS_REGION" "$@"; }
+# Todas las llamadas a AWS pasan por aqui: fija la region y la salida en texto,
+# y quita los \r que la CLI de Windows deja al final de cada linea (en Git Bash
+# acabarian pegados a los ids).
+awsc() { ULTIMO_AWS="aws $*"; aws --region "$AWS_REGION" --output text "$@" | tr -d '\r'; }
+ULTIMO_AWS=""
 
-# "None" es lo que devuelve la CLI con --output text cuando no encuentra nada.
-none_to_empty() { [ "$1" = "None" ] && echo "" || echo "$1"; }
-
-b64() {
-  if base64 --help 2>&1 | grep -q -- '-w'; then base64 -w0; else base64 | tr -d '\n'; fi
+# La CLI de Windows no entiende las rutas /tmp/... de Git Bash.
+archivo_cli() {
+  if command -v cygpath >/dev/null 2>&1; then echo "file://$(cygpath -w "$1")"; else echo "file://$1"; fi
 }
+
+vacio() { [ -z "$1" ] || [ "$1" = "None" ]; }
 
 rand_hex() {
-  if command -v openssl >/dev/null 2>&1; then openssl rand -hex "${1:-32}"
-  else node -e "console.log(require('crypto').randomBytes(${1:-32}).toString('hex'))"; fi
+  if command -v openssl >/dev/null 2>&1; then openssl rand -hex "$1"
+  else node -e "console.log(require('crypto').randomBytes($1).toString('hex'))"; fi
 }
 
-leer_env()    { [ -f "$ENV_FILE" ] || return 0; sed -n "s/^$1=//p" "$ENV_FILE" | head -1; }
-leer_salida() { [ -f "$OUT_FILE" ] || return 0; sed -n "s/^ *$1=//p" "$OUT_FILE" | head -1; }
+# ===========================================================================
+# DESHACER SI ALGO FALLA
+# ===========================================================================
+# Cada recurso, nada mas crearse, apunta aqui como se borra. Si el script se
+# corta, al_salir los borra en orden inverso: lo ultimo creado, primero.
+DESHACER=()
+PENDIENTES=()
+TERMINADO=0
+ERROR_EN=""
 
-# --- Busqueda de recursos, siempre por nombre o etiqueta ---------------------
-# No hay fichero de estado: cualquier maquina con credenciales encuentra lo
-# mismo, y borrar el directorio no deja recursos huerfanos.
+deshecho()    { printf '        %sborrado%s %s\n' "$G" "$N" "$1"; }
+no_deshecho() { printf '        %sNO se pudo borrar%s %s\n' "$R" "$N" "$1"; PENDIENTES+=("$1"); }
 
-find_vpc() {
-  none_to_empty "$(awsc ec2 describe-vpcs --filters Name=isDefault,Values=true \
-    --query 'Vpcs[0].VpcId' --output text)"
-}
-
-find_subnet() {
-  none_to_empty "$(awsc ec2 describe-subnets \
-    --filters "Name=vpc-id,Values=$1" Name=map-public-ip-on-launch,Values=true \
-    --query 'Subnets | sort_by(@, &AvailabilityZone) | [0].SubnetId' --output text)"
-}
-
-find_sg() {
-  none_to_empty "$(awsc ec2 describe-security-groups \
-    --filters "Name=group-name,Values=$SG_NAME" \
-    --query 'SecurityGroups[0].GroupId' --output text)"
-}
-
-# Solo instancias vivas: las terminadas siguen visibles en la API durante horas
-# y si no se filtran el script cree que ya hay una y no crea nada.
-find_instance() {
-  none_to_empty "$(awsc ec2 describe-instances \
-    --filters "Name=tag:Name,Values=$INSTANCE_NAME" \
-              "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-    --query 'Reservations[].Instances[0].InstanceId | [0]' --output text)"
-}
-
-find_eip_alloc() {
-  none_to_empty "$(awsc ec2 describe-addresses --filters "Name=tag:Name,Values=$INSTANCE_NAME" \
-    --query 'Addresses[0].AllocationId' --output text)"
-}
-
-ecr_uri() {
-  none_to_empty "$(awsc ecr describe-repositories --repository-names "$1" \
-    --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo None)"
-}
-
-# Crea el repositorio si falta y le pone la politica de ciclo de vida. Sin ella
-# cada push deja una capa huerfana y el repositorio crece sin limite.
-ensure_ecr() {
-  local repo="$1" pol
-  if [ -z "$(ecr_uri "$repo")" ]; then
-    log "Creando repositorio ECR $repo"
-    awsc ecr create-repository --repository-name "$repo" \
-      --image-scanning-configuration scanOnPush=true \
-      --tags "Key=$TAG_KEY,Value=$TAG_VALUE" >/dev/null
-    ok "ECR $repo creado"
+borrar_ecr() {
+  if awsc ecr delete-repository --repository-name "$1" --force >/dev/null; then
+    deshecho "repositorio ECR $1"
   else
-    skip "ECR $repo ya existe"
+    no_deshecho "repositorio ECR $1"
   fi
-  pol="$(mktemp)"
-  cat > "$pol" <<'JSON'
-{"rules":[{"rulePriority":1,"description":"Conservar solo las 5 ultimas imagenes",
-"selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},
-"action":{"type":"expire"}}]}
-JSON
-  awsc ecr put-lifecycle-policy --repository-name "$repo" \
-    --lifecycle-policy-text "file://$pol" >/dev/null
-  rm -f "$pol"
 }
 
-# --- DNS --------------------------------------------------------------------
-
-find_hosted_zone() {
-  local probe="$1" zone=''
-  while [ -n "$probe" ]; do
-    zone="$(awsc route53 list-hosted-zones-by-name --dns-name "$probe" \
-      --query "HostedZones[?Name==\`${probe}.\`].Id | [0]" --output text 2>/dev/null || echo None)"
-    zone="$(none_to_empty "$zone")"
-    if [ -n "$zone" ]; then echo "${zone##*/}"; return 0; fi
-    case "$probe" in *.*) probe="${probe#*.}" ;; *) break ;; esac
+borrar_rol() {
+  local arn
+  for arn in $(awsc iam list-attached-role-policies --role-name "$ROLE_NAME" \
+                 --query 'AttachedPolicies[].PolicyArn' 2>/dev/null); do
+    awsc iam detach-role-policy --role-name "$ROLE_NAME" --policy-arn "$arn" >/dev/null
   done
-  echo ""
-}
-
-dns_upsert() {
-  local tmp; tmp="$(mktemp)"
-  printf '{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"%s","Type":"%s","TTL":60,"ResourceRecords":[{"Value":"%s"}]}}]}' \
-    "$2" "$3" "$4" > "$tmp"
-  awsc route53 change-resource-record-sets --hosted-zone-id "$1" \
-    --change-batch "file://$tmp" >/dev/null
-  rm -f "$tmp"
-}
-
-resolve_host() {
-  if command -v dig >/dev/null 2>&1; then
-    dig +short "$1" @1.1.1.1 2>/dev/null | grep -E '^[0-9.]+$' | tail -1
-  elif command -v nslookup >/dev/null 2>&1; then
-    nslookup "$1" 1.1.1.1 2>/dev/null | awk '/^Address: /{print $2}' | tail -1
+  if awsc iam delete-role --role-name "$ROLE_NAME" >/dev/null; then
+    deshecho "rol IAM $ROLE_NAME"
   else
-    echo "__sin_resolver__"
+    no_deshecho "rol IAM $ROLE_NAME"
   fi
 }
 
-wait_dns() {
-  local host="$1" want="$2" got=''
-  log "Esperando a que $host resuelva a $want"
-  for _ in $(seq 1 "${3:-60}"); do
-    got="$(resolve_host "$host")"
-    if [ "$got" = "__sin_resolver__" ]; then
-      warn "sin dig ni nslookup: no puedo comprobar el DNS"; return 0
+borrar_perfil() {
+  awsc iam remove-role-from-instance-profile --instance-profile-name "$PROFILE_NAME" \
+    --role-name "$ROLE_NAME" >/dev/null 2>&1
+  if awsc iam delete-instance-profile --instance-profile-name "$PROFILE_NAME" >/dev/null; then
+    deshecho "perfil de instancia $PROFILE_NAME"
+  else
+    no_deshecho "perfil de instancia $PROFILE_NAME"
+  fi
+}
+
+# La interfaz de red de la instancia tarda un poco en soltarse tras terminarla.
+borrar_sg() {
+  local i
+  for i in $(seq 1 18); do
+    if awsc ec2 delete-security-group --group-id "$1" >/dev/null 2>&1; then
+      deshecho "security group $1"; return 0
     fi
-    if [ "$got" = "$want" ]; then ok "$host -> $want"; return 0; fi
-    skip "$host resuelve a '${got:-nada}', reintento en 10s"
+    info "el security group sigue en uso, reintento en 10s ($i/18)"
     sleep 10
   done
-  warn "$host todavia no resuelve a $want"
-  return 1
+  no_deshecho "security group $1"
 }
 
-# --- SSM: comandos dentro de la instancia sin abrir el puerto 22 -------------
-
-wait_ssm_ready() {
-  local id="$1" n
-  log "Esperando a que $id se registre en SSM"
-  for _ in $(seq 1 60); do
-    n="$(awsc ssm describe-instance-information --filters "Key=InstanceIds,Values=$id" \
-      --query 'length(InstanceInformationList)' --output text 2>/dev/null || echo 0)"
-    if [ "$n" = "1" ]; then ok "instancia registrada en SSM"; return 0; fi
-    sleep 10
-  done
-  die "la instancia no aparece en SSM. Revisa el rol $ROLE_NAME y su salida a internet."
-}
-
-# Ejecuta por stdin un script de shell completo dentro de la instancia. Va en
-# base64 para no pelearse con el escapado de JSON de la CLI.
-ssm_run() {
-  local id="$1" desc="${2:-comando remoto}" payload cmd_id estado
-  payload="$(b64)"
-  cmd_id="$(awsc ssm send-command --instance-ids "$id" \
-    --document-name AWS-RunShellScript --comment "$desc" --timeout-seconds 600 \
-    --parameters "commands=[\"echo $payload | base64 -d > /tmp/ssm-run.sh\",\"bash /tmp/ssm-run.sh\"]" \
-    --query 'Command.CommandId' --output text)"
-  log "SSM: $desc ($cmd_id)"
-  for _ in $(seq 1 120); do
-    estado="$(awsc ssm get-command-invocation --command-id "$cmd_id" --instance-id "$id" \
-      --query 'Status' --output text 2>/dev/null || echo Pending)"
-    case "$estado" in
-      Success)
-        awsc ssm get-command-invocation --command-id "$cmd_id" --instance-id "$id" \
-          --query 'StandardOutputContent' --output text
-        ok "$desc"; return 0 ;;
-      Failed|Cancelled|TimedOut)
-        awsc ssm get-command-invocation --command-id "$cmd_id" --instance-id "$id" \
-          --query 'StandardErrorContent' --output text >&2
-        die "$desc fallo con estado $estado" ;;
-    esac
+# Una Elastic IP sin liberar se sigue cobrando aunque no tenga instancia.
+liberar_eip() {
+  local i asoc
+  asoc="$(awsc ec2 describe-addresses --allocation-ids "$1" \
+            --query 'Addresses[0].AssociationId' 2>/dev/null)"
+  if ! vacio "$asoc"; then
+    awsc ec2 disassociate-address --association-id "$asoc" >/dev/null 2>&1
+  fi
+  for i in $(seq 1 6); do
+    if awsc ec2 release-address --allocation-id "$1" >/dev/null 2>&1; then
+      deshecho "Elastic IP $1"; return 0
+    fi
     sleep 5
   done
-  die "$desc no termino en 10 minutos"
+  no_deshecho "Elastic IP $1"
 }
 
+terminar_instancia() {
+  info "terminando la instancia $1 (1-2 minutos)"
+  if awsc ec2 terminate-instances --instance-ids "$1" >/dev/null \
+     && awsc ec2 wait instance-terminated --instance-ids "$1"; then
+    deshecho "instancia EC2 $1 (con su disco)"
+  else
+    no_deshecho "instancia EC2 $1"
+  fi
+}
+
+# IAM no deja borrar un usuario con claves o politicas colgando.
+borrar_usuario_ci() {
+  local k
+  for k in $(awsc iam list-access-keys --user-name "$CI_USER" \
+               --query 'AccessKeyMetadata[].AccessKeyId' 2>/dev/null); do
+    awsc iam delete-access-key --user-name "$CI_USER" --access-key-id "$k" >/dev/null
+  done
+  awsc iam delete-user-policy --user-name "$CI_USER" --policy-name "$CI_POLICY" >/dev/null 2>&1
+  if awsc iam delete-user --user-name "$CI_USER" >/dev/null; then
+    deshecho "usuario IAM $CI_USER (con su access key)"
+  else
+    no_deshecho "usuario IAM $CI_USER"
+  fi
+}
+
+al_salir() {
+  local codigo=$? i
+  exec 1>&3 2>&4
+  rm -rf "$TMP_DIR"
+  if [ "$TERMINADO" = 1 ]; then return 0; fi
+
+  # A partir de aqui nada puede cortar la limpieza.
+  trap '' INT TERM
+  trap - ERR
+  set +eEu
+  if [ "$codigo" = 0 ]; then codigo=1; fi
+  rm -f "$OUT_FILE.tmp"
+
+  printf '\n%s==============================================================================%s\n' "$R" "$N"
+  printf '%s FALLO en el paso %d/%d: %s%s\n' "$R" "$PASO" "$TOTAL" "$PASO_DESC" "$N"
+  if [ "$codigo" = 130 ]; then
+    printf ' Cancelado con Ctrl+C.\n'
+  elif [ -n "$ERROR_EN" ]; then
+    printf ' Comando que fallo: %s\n' "$(printf '%s' "$ERROR_EN" | head -1 | cut -c1-160)"
+    printf ' El mensaje de AWS, si lo hay, esta justo encima de este recuadro.\n'
+  fi
+  printf '%s==============================================================================%s\n' "$R" "$N"
+
+  if [ ${#DESHACER[@]} -eq 0 ]; then
+    printf '\nTodavia no se habia creado nada en AWS: no hay nada que deshacer.\n'
+  else
+    printf '\n%sDeshaciendo lo creado (%d recursos, del ultimo al primero). No cierres la terminal.%s\n' \
+      "$Y" "${#DESHACER[@]}" "$N"
+    for (( i=${#DESHACER[@]}-1; i>=0; i-- )); do
+      eval "${DESHACER[$i]}"
+    done
+    if [ ${#PENDIENTES[@]} -eq 0 ]; then
+      printf '\n%sListo: se borro todo lo que esta ejecucion habia creado. La cuenta quedo como estaba.%s\n' "$G" "$N"
+    else
+      printf '\n%sNo se pudo borrar:%s\n' "$R" "$N"
+      printf '  - %s\n' "${PENDIENTES[@]}"
+      printf '\nReintentalo con ./infra/aws-down.sh --yes, que borra por nombre todo lo del proyecto.\n'
+    fi
+  fi
+  exit "$codigo"
+}
+
+# Se queda con el primer comando que fallo. Si fue dentro de awsc, la llamada
+# a AWS completa dice mas que la linea del pipe.
+trap 'if [ -z "$ERROR_EN" ]; then
+        if [ "${FUNCNAME[0]:-}" = awsc ]; then ERROR_EN="$ULTIMO_AWS"
+        else ERROR_EN="linea $LINENO: $BASH_COMMAND"; fi
+      fi' ERR
+trap 'exit 130' INT TERM
+trap al_salir EXIT
+
 # ===========================================================================
-# ARRANQUE
+# 1. CLI Y SESION
 # ===========================================================================
+paso "Comprobando la CLI de AWS y tu sesion"
+command -v aws >/dev/null 2>&1 \
+  || falla "no encuentro el comando 'aws'. Instala la AWS CLI v2 y abre una terminal nueva."
+info "$(aws --version 2>&1 | tr -d '\r')"
+IDENTIDAD="$(awsc sts get-caller-identity --query '[Account,Arn]')" \
+  || falla "la CLI no tiene una sesion valida. Ejecuta 'aws login' (o 'aws configure') y vuelve a lanzar el script."
+ACCOUNT="$(cut -f1 <<<"$IDENTIDAD")"
+ok "cuenta $ACCOUNT como $(cut -f2 <<<"$IDENTIDAD")"
+ok "region $AWS_REGION"
 
-ROTAR=0
-ESPERAR_DNS=0
-for arg in "$@"; do
-  case "$arg" in
-    --rotar-claves) ROTAR=1 ;;
-    --esperar-dns)  ESPERAR_DNS=1 ;;
-    -h|--help)      sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
-    *) die "opcion desconocida: $arg" ;;
-  esac
+# ===========================================================================
+# 2. RESTOS DE UNA EJECUCION ANTERIOR
+# ===========================================================================
+# Si ya existe algo con estos nombres no lo creo esta ejecucion, asi que ni se
+# reutiliza ni se borra: se para antes de crear nada.
+paso "Comprobando que no quede nada de una ejecucion anterior"
+EXISTENTES=()
+for repo in "$ECR_BACKEND" "$ECR_FRONTEND"; do
+  if awsc ecr describe-repositories --repository-names "$repo" >/dev/null 2>&1; then
+    EXISTENTES+=("repositorio ECR $repo")
+  fi
 done
-
-need aws "Instalalo desde https://aws.amazon.com/cli/"
-awsc sts get-caller-identity >/dev/null 2>&1 \
-  || die "la CLI de AWS no tiene credenciales validas. Ejecuta: aws configure"
-
-ACCOUNT="$(awsc sts get-caller-identity --query Account --output text)"
-log "Cuenta $ACCOUNT, region $AWS_REGION, stack $STACK"
-
-# ---------------------------------------------------------------------------
-# 1. Secretos de la aplicacion
-# ---------------------------------------------------------------------------
-# Generarlos aqui no es desplegar: son las credenciales de los recursos que
-# este script crea, y sin ellas no se puede configurar el CI. Salen de
-# openssl, no del codigo de la aplicacion.
-if [ ! -f "$ENV_FILE" ]; then
-  log "Generando $ENV_FILE"
-  cat > "$ENV_FILE" <<ENVEOF
-# Secretos de la aplicacion. Generado por aws-up.sh.
-# NO subir a git.
-
-POSTGRES_PASSWORD=$(rand_hex 24)
-JWT_SECRET=$(rand_hex 48)
-
-JWT_EXPIRES_IN=7d
-BCRYPT_ROUNDS=10
-
-# Sin OPENAI_API_KEY, /api/boceto y /api/voz responden 503 y el resto de la
-# API funciona con normalidad.
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-5.6-terra
-OPENAI_TIMEOUT_MS=90000
-OPENAI_VOZ_MODELO=gpt-realtime-2.1-mini
-OPENAI_VOZ=marin
-
-BOCETO_MAX_BYTES=10485760
-AUTOSAVE_INTERVAL_MS=15000
-AUTO_MIGRATE=true
-ENVEOF
-  chmod 600 "$ENV_FILE" 2>/dev/null || true
-  ok "$ENV_FILE creado"
-else
-  skip "$ENV_FILE ya existe, se respeta"
+if awsc iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+  EXISTENTES+=("rol IAM $ROLE_NAME")
 fi
-
-# ---------------------------------------------------------------------------
-# 2. ECR
-# ---------------------------------------------------------------------------
-ensure_ecr "$ECR_REPO"
-ensure_ecr "$ECR_REPO_FRONTEND"
-
-# ---------------------------------------------------------------------------
-# 3. Rol de la instancia
-# ---------------------------------------------------------------------------
-if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
-  log "Creando rol IAM $ROLE_NAME"
-  TMP="$(mktemp)"
-  cat > "$TMP" <<'JSON'
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-"Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}
-JSON
-  aws iam create-role --role-name "$ROLE_NAME" \
-    --assume-role-policy-document "file://$TMP" \
-    --tags "Key=$TAG_KEY,Value=$TAG_VALUE" >/dev/null
-  rm -f "$TMP"
-  ok "rol creado"
-else
-  skip "rol $ROLE_NAME ya existe"
+if awsc iam get-instance-profile --instance-profile-name "$PROFILE_NAME" >/dev/null 2>&1; then
+  EXISTENTES+=("perfil de instancia $PROFILE_NAME")
 fi
-
-# SSM da la consola remota y la ejecucion de comandos; ECR read deja a la
-# instancia bajarse las imagenes sin credenciales guardadas en disco.
-for arn in \
-  arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore \
-  arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
-do
-  aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn "$arn" >/dev/null
-done
-ok "politicas del rol al dia"
-
-if ! aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME" >/dev/null 2>&1; then
-  log "Creando perfil de instancia $PROFILE_NAME"
-  aws iam create-instance-profile --instance-profile-name "$PROFILE_NAME" >/dev/null
-  aws iam add-role-to-instance-profile \
-    --instance-profile-name "$PROFILE_NAME" --role-name "$ROLE_NAME" >/dev/null
-  # IAM es eventualmente consistente: si lanzamos la instancia de inmediato,
-  # EC2 todavia no ve el perfil y el RunInstances falla.
-  log "Esperando 15s a que IAM propague el perfil"
-  sleep 15
-  ok "perfil creado"
-else
-  skip "perfil $PROFILE_NAME ya existe"
+if awsc iam get-user --user-name "$CI_USER" >/dev/null 2>&1; then
+  EXISTENTES+=("usuario IAM $CI_USER")
 fi
+SGS="$(awsc ec2 describe-security-groups --filters "Name=group-name,Values=$SG_NAME" \
+         --query 'SecurityGroups[].GroupId')"
+if [ -n "$SGS" ]; then EXISTENTES+=("security group $SGS"); fi
+INSTANCIAS="$(awsc ec2 describe-instances \
+  --filters "Name=tag:Name,Values=$INSTANCE_NAME" \
+            "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+  --query 'Reservations[].Instances[].InstanceId')"
+if [ -n "$INSTANCIAS" ]; then EXISTENTES+=("instancia EC2 $INSTANCIAS"); fi
+IPS="$(awsc ec2 describe-addresses --filters "Name=tag:Name,Values=$INSTANCE_NAME" \
+         --query 'Addresses[].PublicIp')"
+if [ -n "$IPS" ]; then EXISTENTES+=("Elastic IP $IPS"); fi
 
-# ---------------------------------------------------------------------------
-# 4. Red y Security Group
-# ---------------------------------------------------------------------------
-VPC_ID="$(find_vpc)"
-[ -n "$VPC_ID" ] || die "no hay VPC por defecto en $AWS_REGION. Creala en la consola: VPC > Acciones > Crear VPC predeterminada."
-SUBNET_ID="$(find_subnet "$VPC_ID")"
-[ -n "$SUBNET_ID" ] || die "no hay subred publica en $VPC_ID"
+if [ ${#EXISTENTES[@]} -gt 0 ]; then
+  for e in "${EXISTENTES[@]}"; do info "ya existe: $e"; done
+  falla "hay recursos del proyecto de una ejecucion anterior. Borralos con ./infra/aws-down.sh y vuelve a lanzar este script."
+fi
+ok "la cuenta esta limpia"
+
+# ===========================================================================
+# 3. RED
+# ===========================================================================
+paso "Buscando la VPC y la subred publica por defecto"
+VPC_ID="$(awsc ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId')"
+if vacio "$VPC_ID"; then
+  falla "no hay VPC por defecto en $AWS_REGION. Creala en la consola: VPC > Acciones > Crear VPC predeterminada."
+fi
+# Ordenadas por zona: us-east-1e no tiene instancias t3 y no debe salir primera.
+SUBNET_ID="$(awsc ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=$VPC_ID" Name=default-for-az,Values=true \
+  --query 'sort_by(Subnets, &AvailabilityZone)[0].SubnetId')"
+if vacio "$SUBNET_ID"; then falla "la VPC $VPC_ID no tiene subredes por defecto"; fi
 ok "VPC $VPC_ID, subred $SUBNET_ID"
 
-SG_ID="$(find_sg)"
-if [ -z "$SG_ID" ]; then
-  log "Creando security group $SG_NAME"
-  SG_ID="$(awsc ec2 create-security-group --group-name "$SG_NAME" \
-    --description "HTTP y HTTPS para $STACK" --vpc-id "$VPC_ID" \
-    --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=$SG_NAME},{Key=$TAG_KEY,Value=$TAG_VALUE}]" \
-    --query 'GroupId' --output text)"
-  ok "security group $SG_ID"
+# ===========================================================================
+# 4. SECRETOS DE LA APLICACION
+# ===========================================================================
+paso "Generando los secretos de la aplicacion"
+POSTGRES_PASSWORD="$(rand_hex 24)"
+JWT_SECRET="$(rand_hex 48)"
+ok "POSTGRES_PASSWORD y JWT_SECRET aleatorios"
+
+# La clave de OpenAI: la del entorno o, si no, la del .env de desarrollo.
+OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+ORIGEN_OPENAI="la variable de entorno OPENAI_API_KEY"
+if [ -z "$OPENAI_API_KEY" ] && [ -f "$DIR/../.env" ]; then
+  OPENAI_API_KEY="$(awk '/^OPENAI_API_KEY=/{sub(/^[^=]*=/, ""); print; exit}' "$DIR/../.env" | tr -d '\r" ')"
+  ORIGEN_OPENAI="el .env del backend"
+fi
+if [ -n "$OPENAI_API_KEY" ]; then
+  ok "OPENAI_API_KEY tomada de $ORIGEN_OPENAI"
 else
-  skip "security group $SG_ID ya existe"
+  info "sin OPENAI_API_KEY: la app funciona, pero la IA respondera 503 hasta que la agregues"
 fi
 
-# El 80 no es decorativo: Let's Encrypt valida el dominio por HTTP-01 y Caddy
-# lo usa ademas para redirigir a HTTPS. Sin puerto 22: se entra por SSM.
+# ===========================================================================
+# 5-6. ECR
+# ===========================================================================
+# Con la politica de ciclo de vida, cada push no deja una imagen mas para
+# siempre: se guardan las 5 ultimas.
+crear_ecr() {
+  local uri
+  uri="$(awsc ecr create-repository --repository-name "$1" --tags "$TAG" \
+           --query 'repository.repositoryUri')"
+  DESHACER+=("borrar_ecr $1")
+  awsc ecr put-lifecycle-policy --repository-name "$1" \
+    --lifecycle-policy-text '{"rules":[{"rulePriority":1,"description":"Conservar las 5 ultimas","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}' \
+    >/dev/null
+  ok "$uri"
+}
+
+paso "Creando el repositorio de imagenes del backend ($ECR_BACKEND)"
+crear_ecr "$ECR_BACKEND"
+
+paso "Creando el repositorio de imagenes del frontend ($ECR_FRONTEND)"
+crear_ecr "$ECR_FRONTEND"
+
+# ===========================================================================
+# 7-8. ROL Y PERFIL DE LA INSTANCIA
+# ===========================================================================
+paso "Creando el rol IAM de la instancia ($ROLE_NAME)"
+awsc iam create-role --role-name "$ROLE_NAME" --tags "$TAG" \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
+  >/dev/null
+DESHACER+=("borrar_rol")
+# SSM: el CI ejecuta los despliegues por aqui, sin SSH. ECR: bajar las imagenes.
+awsc iam attach-role-policy --role-name "$ROLE_NAME" \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >/dev/null
+awsc iam attach-role-policy --role-name "$ROLE_NAME" \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly >/dev/null
+ok "rol con permisos de SSM y de lectura de ECR"
+
+paso "Creando el perfil de instancia ($PROFILE_NAME)"
+awsc iam create-instance-profile --instance-profile-name "$PROFILE_NAME" --tags "$TAG" >/dev/null
+DESHACER+=("borrar_perfil")
+awsc iam add-role-to-instance-profile --instance-profile-name "$PROFILE_NAME" \
+  --role-name "$ROLE_NAME" >/dev/null
+ok "perfil con el rol $ROLE_NAME"
+
+# ===========================================================================
+# 9. SECURITY GROUP
+# ===========================================================================
+paso "Creando el security group ($SG_NAME)"
+SG_ID="$(awsc ec2 create-security-group --group-name "$SG_NAME" \
+  --description "HTTP y HTTPS de $PROJECT" --vpc-id "$VPC_ID" \
+  --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=$SG_NAME},{$TAG}]" \
+  --query 'GroupId')"
+DESHACER+=("borrar_sg $SG_ID")
+# El 80 lo necesita Let's Encrypt para validar el dominio, y redirige a HTTPS.
 for puerto in 80 443; do
   awsc ec2 authorize-security-group-ingress --group-id "$SG_ID" \
-    --protocol tcp --port "$puerto" --cidr 0.0.0.0/0 >/dev/null 2>&1 || true
+    --protocol tcp --port "$puerto" --cidr 0.0.0.0/0 >/dev/null
 done
-ok "puertos 80 y 443 abiertos"
+ok "$SG_ID con los puertos 80 y 443 abiertos"
 
-# ---------------------------------------------------------------------------
-# 5. Instancia EC2
-# ---------------------------------------------------------------------------
-INSTANCE_ID="$(find_instance)"
-if [ -z "$INSTANCE_ID" ]; then
-  AMI_ID="$(awsc ssm get-parameter \
-    --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
-    --query 'Parameter.Value' --output text)"
-  log "Lanzando $INSTANCE_TYPE con AMI $AMI_ID"
+# ===========================================================================
+# 10. ELASTIC IP
+# ===========================================================================
+paso "Reservando una IP publica fija (Elastic IP)"
+EIP="$(awsc ec2 allocate-address --domain vpc \
+  --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=$INSTANCE_NAME},{$TAG}]" \
+  --query '[AllocationId,PublicIp]')"
+ALLOC_ID="$(cut -f1 <<<"$EIP")"
+PUBLIC_IP="$(cut -f2 <<<"$EIP")"
+DESHACER+=("liberar_eip $ALLOC_ID")
+DOMINIO_PROPIO=1
+if [ -z "$APP_DOMAIN" ]; then
+  APP_DOMAIN="${PUBLIC_IP//./-}.sslip.io"
+  DOMINIO_PROPIO=0
+fi
+ok "$PUBLIC_IP ($ALLOC_ID)"
+ok "la aplicacion quedara en https://$APP_DOMAIN"
 
-  TMP="$(mktemp)"
-  cat > "$TMP" <<USERDATA
+# ===========================================================================
+# 11. INSTANCIA
+# ===========================================================================
+paso "Lanzando la instancia EC2 ($INSTANCE_TYPE, Amazon Linux 2023, ${DISK_GB} GB)"
+AMI_ID="$(awsc ssm get-parameter \
+  --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+  --query 'Parameter.Value')"
+info "imagen $AMI_ID"
+
+# Lo ejecuta cloud-init una sola vez, en el primer arranque. El paso 15
+# comprueba que termino bien.
+cat > "$TMP_DIR/user-data.sh" <<USERDATA
 #!/bin/bash
-set -eux
-
-dnf update -y
+set -euxo pipefail
 dnf install -y docker
-
-# El plugin de compose no esta en los repos de AL2023: se baja el binario.
 mkdir -p /usr/local/lib/docker/cli-plugins
-curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-compose \\
+curl -fsSL --retry 5 -o /usr/local/lib/docker/cli-plugins/docker-compose \\
   https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64
 chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-
 systemctl enable --now docker
 usermod -aG docker ec2-user
-
-# t3.micro son 1 GB de RAM y ahi conviviran Node, PostgreSQL y Caddy. Con 2 GB
-# de swap el pico del arranque con migraciones deja de matar contenedores.
-if [ ! -f /swapfile ]; then
-  dd if=/dev/zero of=/swapfile bs=1M count=2048
-  chmod 600 /swapfile
-  mkswap /swapfile
-  swapon /swapfile
-  echo '/swapfile none swap sw 0 0' >> /etc/fstab
-fi
-
-# Donde el pipeline del backend dejara el compose, el Caddyfile y el .env.
-mkdir -p $REMOTE_DIR
+# 1 GB de RAM para Node, PostgreSQL y Caddy: con 2 GB de swap el arranque con
+# migraciones no mata contenedores.
+dd if=/dev/zero of=/swapfile bs=1M count=2048
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+mkdir -p /opt/$PROJECT
 USERDATA
 
-  INSTANCE_ID="$(awsc ec2 run-instances \
-    --image-id "$AMI_ID" --instance-type "$INSTANCE_TYPE" \
-    --subnet-id "$SUBNET_ID" --security-group-ids "$SG_ID" \
-    --iam-instance-profile "Name=$PROFILE_NAME" \
-    --metadata-options "HttpTokens=required,HttpPutResponseHopLimit=1" \
-    --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=$ROOT_VOLUME_GB,VolumeType=gp3,DeleteOnTermination=true}" \
-    --user-data "file://$TMP" \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME},{Key=$TAG_KEY,Value=$TAG_VALUE}]" \
-    --query 'Instances[0].InstanceId' --output text)"
-  rm -f "$TMP"
-  ok "instancia $INSTANCE_ID lanzada"
-else
-  skip "instancia $INSTANCE_ID ya existe"
-fi
+# Recien creado, el perfil puede tardar unos segundos en ser visible para EC2.
+INSTANCE_ID=""
+for intento in $(seq 1 12); do
+  if INSTANCE_ID="$(awsc ec2 run-instances \
+      --image-id "$AMI_ID" --instance-type "$INSTANCE_TYPE" \
+      --subnet-id "$SUBNET_ID" --security-group-ids "$SG_ID" \
+      --iam-instance-profile "Name=$PROFILE_NAME" \
+      --metadata-options "HttpTokens=required,HttpPutResponseHopLimit=1" \
+      --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=$DISK_GB,VolumeType=gp3,DeleteOnTermination=true}" \
+      --user-data "$(archivo_cli "$TMP_DIR/user-data.sh")" \
+      --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME},{$TAG}]" \
+      --query 'Instances[0].InstanceId' 2>"$TMP_DIR/error.txt")"; then
+    break
+  fi
+  if grep -qi 'instance profile' "$TMP_DIR/error.txt"; then
+    INSTANCE_ID=""
+    info "IAM todavia no propago el perfil, reintento en 10s ($intento/12)"
+    sleep 10
+    continue
+  fi
+  cat "$TMP_DIR/error.txt" >&2
+  falla "AWS rechazo el lanzamiento de la instancia (mensaje arriba)"
+done
+if vacio "$INSTANCE_ID"; then falla "IAM no propago el perfil de la instancia en 2 minutos"; fi
+DESHACER+=("terminar_instancia $INSTANCE_ID")
+ok "instancia $INSTANCE_ID lanzada"
 
-log "Esperando a que la instancia este en running"
+# ===========================================================================
+# 12. ARRANQUE E IP
+# ===========================================================================
+paso "Esperando a que la instancia arranque y asociando la IP"
 awsc ec2 wait instance-running --instance-ids "$INSTANCE_ID"
-ok "instancia en running"
-
-# ---------------------------------------------------------------------------
-# 6. Elastic IP
-# ---------------------------------------------------------------------------
-ALLOC_ID="$(find_eip_alloc)"
-if [ -z "$ALLOC_ID" ]; then
-  log "Reservando Elastic IP"
-  ALLOC_ID="$(awsc ec2 allocate-address --domain vpc \
-    --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=$INSTANCE_NAME},{Key=$TAG_KEY,Value=$TAG_VALUE}]" \
-    --query 'AllocationId' --output text)"
-  ok "Elastic IP $ALLOC_ID"
-else
-  skip "Elastic IP $ALLOC_ID ya reservada"
-fi
-
+ok "instancia en marcha"
 awsc ec2 associate-address --instance-id "$INSTANCE_ID" --allocation-id "$ALLOC_ID" >/dev/null
-PUBLIC_IP="$(awsc ec2 describe-addresses --allocation-ids "$ALLOC_ID" \
-  --query 'Addresses[0].PublicIp' --output text)"
-ok "IP publica $PUBLIC_IP"
+ok "IP $PUBLIC_IP asociada"
 
-# ---------------------------------------------------------------------------
-# 7. Usuario IAM del CI
-# ---------------------------------------------------------------------------
-if ! aws iam get-user --user-name "$CI_USER" >/dev/null 2>&1; then
-  log "Creando usuario IAM $CI_USER"
-  aws iam create-user --user-name "$CI_USER" \
-    --tags "Key=$TAG_KEY,Value=$TAG_VALUE" >/dev/null
-  ok "usuario creado"
-else
-  skip "usuario $CI_USER ya existe"
-fi
+# ===========================================================================
+# 13. USUARIO DEL CI
+# ===========================================================================
+paso "Creando el usuario IAM del CI ($CI_USER) y su access key"
+awsc iam create-user --user-name "$CI_USER" --tags "$TAG" >/dev/null
+DESHACER+=("borrar_usuario_ci")
 
-# La politica se reescribe en cada ejecucion porque lleva dentro el id de la
-# instancia: si algun dia se recrea, el permiso sigue apuntando a la correcta.
-# ssm:SendCommand esta limitado a ESA instancia y al documento de shell: el CI
-# no puede ejecutar nada en ninguna otra maquina de la cuenta.
-log "Aplicando la politica $CI_POLICY"
-TMP="$(mktemp)"
-cat > "$TMP" <<JSON
+# Solo puede subir imagenes a los dos repositorios del proyecto y ejecutar
+# comandos en ESTA instancia. No puede crear ni borrar nada.
+cat > "$TMP_DIR/politica-ci.json" <<JSON
 {
   "Version": "2012-10-17",
   "Statement": [
-    {
-      "Sid": "AutenticarseEnECR",
-      "Effect": "Allow",
-      "Action": "ecr:GetAuthorizationToken",
-      "Resource": "*"
-    },
-    {
-      "Sid": "SubirImagenes",
-      "Effect": "Allow",
-      "Action": [
-        "ecr:BatchCheckLayerAvailability",
-        "ecr:CompleteLayerUpload",
-        "ecr:DescribeRepositories",
-        "ecr:InitiateLayerUpload",
-        "ecr:PutImage",
-        "ecr:UploadLayerPart"
-      ],
-      "Resource": [
-        "arn:aws:ecr:$AWS_REGION:$ACCOUNT:repository/$ECR_REPO",
-        "arn:aws:ecr:$AWS_REGION:$ACCOUNT:repository/$ECR_REPO_FRONTEND"
-      ]
-    },
-    {
-      "Sid": "EncontrarLaInstancia",
-      "Effect": "Allow",
-      "Action": [
-        "ec2:DescribeInstances",
-        "ec2:DescribeAddresses",
-        "ssm:DescribeInstanceInformation"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "DesplegarSoloEnEstaInstancia",
-      "Effect": "Allow",
+    { "Sid": "AutenticarseEnECR", "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken", "Resource": "*" },
+    { "Sid": "SubirImagenes", "Effect": "Allow",
+      "Action": [ "ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage",
+                  "ecr:CompleteLayerUpload", "ecr:DescribeRepositories",
+                  "ecr:GetDownloadUrlForLayer", "ecr:InitiateLayerUpload",
+                  "ecr:PutImage", "ecr:UploadLayerPart" ],
+      "Resource": [ "arn:aws:ecr:$AWS_REGION:$ACCOUNT:repository/$ECR_BACKEND",
+                    "arn:aws:ecr:$AWS_REGION:$ACCOUNT:repository/$ECR_FRONTEND" ] },
+    { "Sid": "EncontrarLaInstancia", "Effect": "Allow",
+      "Action": [ "ec2:DescribeInstances", "ssm:DescribeInstanceInformation",
+                  "sts:GetCallerIdentity" ],
+      "Resource": "*" },
+    { "Sid": "DesplegarSoloEnEstaInstancia", "Effect": "Allow",
       "Action": "ssm:SendCommand",
-      "Resource": [
-        "arn:aws:ec2:$AWS_REGION:$ACCOUNT:instance/$INSTANCE_ID",
-        "arn:aws:ssm:$AWS_REGION::document/AWS-RunShellScript"
-      ]
-    },
-    {
-      "Sid": "LeerElResultado",
-      "Effect": "Allow",
-      "Action": [
-        "ssm:GetCommandInvocation",
-        "ssm:ListCommandInvocations"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "Identificarse",
-      "Effect": "Allow",
-      "Action": "sts:GetCallerIdentity",
-      "Resource": "*"
-    }
+      "Resource": [ "arn:aws:ec2:$AWS_REGION:$ACCOUNT:instance/$INSTANCE_ID",
+                    "arn:aws:ssm:$AWS_REGION::document/AWS-RunShellScript" ] },
+    { "Sid": "LeerElResultado", "Effect": "Allow",
+      "Action": [ "ssm:GetCommandInvocation", "ssm:ListCommandInvocations" ],
+      "Resource": "*" }
   ]
 }
 JSON
-aws iam put-user-policy --user-name "$CI_USER" \
-  --policy-name "$CI_POLICY" --policy-document "file://$TMP" >/dev/null
-rm -f "$TMP"
-ok "politica aplicada"
+awsc iam put-user-policy --user-name "$CI_USER" --policy-name "$CI_POLICY" \
+  --policy-document "$(archivo_cli "$TMP_DIR/politica-ci.json")" >/dev/null
+ok "politica $CI_POLICY: solo subir imagenes y desplegar en $INSTANCE_ID"
 
-# AWS solo muestra el secreto de una access key en el momento de crearla. Si
-# ya existe una y no la tenemos guardada, no hay forma de recuperarla: o se
-# reutiliza la del fichero anterior, o se rota.
-CLAVES="$(aws iam list-access-keys --user-name "$CI_USER" \
-  --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null || echo '')"
+CLAVE="$(awsc iam create-access-key --user-name "$CI_USER" \
+           --query 'AccessKey.[AccessKeyId,SecretAccessKey]')"
+CI_KEY_ID="$(cut -f1 <<<"$CLAVE")"
+CI_KEY_SECRET="$(cut -f2 <<<"$CLAVE")"
+ok "access key $CI_KEY_ID"
 
-KEY_ID=""
-KEY_SECRET=""
-KEY_AVISO=""
+# ===========================================================================
+# 14. SSM
+# ===========================================================================
+paso "Esperando a que la instancia se conecte a SSM (1-3 minutos)"
+CONECTADA=0
+for intento in $(seq 1 60); do
+  n="$(awsc ssm describe-instance-information \
+         --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+         --query 'length(InstanceInformationList)' 2>/dev/null || echo 0)"
+  if [ "$n" = "1" ]; then CONECTADA=1; break; fi
+  if [ $((intento % 3)) = 0 ]; then info "todavia no aparece ($((intento * 10))s)"; fi
+  sleep 10
+done
+if [ "$CONECTADA" != 1 ]; then
+  falla "la instancia no se conecto a SSM en 10 minutos (sin eso los pipelines no pueden desplegar)"
+fi
+ok "instancia conectada: los pipelines ya pueden ejecutar comandos en ella"
 
-# --output text separa con tabuladores: hay que normalizarlos para poder
-# buscar el id rodeado de espacios.
-CLAVES_NORM=" $(printf '%s' "$CLAVES" | tr '\t' ' ') "
+# ===========================================================================
+# 15. DOCKER
+# ===========================================================================
+paso "Esperando a que la instancia termine de instalar Docker"
+cat > "$TMP_DIR/verificar.sh" <<'VERIF'
+cloud-init status --wait >/dev/null 2>&1 || true
+if ! systemctl is-active --quiet docker || ! docker compose version >/dev/null 2>&1; then
+  echo "La instalacion no termino bien. Final de /var/log/cloud-init-output.log:"
+  tail -n 30 /var/log/cloud-init-output.log
+  exit 1
+fi
+docker --version
+docker compose version
+free -m | awk '/^Swap:/ {print "Swap: " $2 " MB"}'
+VERIF
+printf '{"commands":["echo %s | base64 -d | bash"]}' "$(base64 < "$TMP_DIR/verificar.sh" | tr -d '\n')" \
+  > "$TMP_DIR/ssm.json"
+CMD_ID="$(awsc ssm send-command --instance-ids "$INSTANCE_ID" \
+  --document-name AWS-RunShellScript --comment "verificar Docker" \
+  --parameters "$(archivo_cli "$TMP_DIR/ssm.json")" \
+  --query 'Command.CommandId')"
+info "comando SSM $CMD_ID"
 
-GUARDADA_ID="$(leer_salida AWS_ACCESS_KEY_ID)"
-GUARDADA_SECRET="$(leer_salida AWS_SECRET_ACCESS_KEY)"
+ESTADO="Pending"
+for intento in $(seq 1 90); do
+  ESTADO="$(awsc ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+              --query 'Status' 2>/dev/null || echo Pending)"
+  case "$ESTADO" in
+    Pending|InProgress|Delayed) sleep 10 ;;
+    *) break ;;
+  esac
+done
+SALIDA="$(awsc ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query '[StandardOutputContent,StandardErrorContent]' 2>/dev/null || true)"
+printf '%s\n' "$SALIDA" | sed 's/[[:space:]]*$//; /^$/d; s/^/        | /'
+if [ "$ESTADO" != "Success" ]; then
+  falla "la instalacion de Docker en la instancia no termino bien (estado: $ESTADO)"
+fi
+ok "Docker y Docker Compose listos"
 
-if [ "$ROTAR" = "0" ] && [ -n "$GUARDADA_ID" ] && [ -n "$GUARDADA_SECRET" ] \
-   && printf '%s' "$CLAVES_NORM" | grep -q " $GUARDADA_ID "; then
-  KEY_ID="$GUARDADA_ID"
-  KEY_SECRET="$GUARDADA_SECRET"
-  skip "reutilizando la access key $KEY_ID de la ejecucion anterior"
+# ===========================================================================
+# 16. SECRETOS PARA GITHUB
+# ===========================================================================
+paso "Escribiendo los secretos de GitHub en $OUT_FILE"
 
-elif [ "$ROTAR" = "0" ] && [ -n "$CLAVES" ]; then
-  KEY_ID="$(printf '%s' "$CLAVES" | awk '{print $1}')"
-  KEY_SECRET="NO_RECUPERABLE"
-  KEY_AVISO="si"
-  warn "$CI_USER ya tiene access key y AWS no deja recuperar su secreto"
-  warn "vuelve a lanzar el script con --rotar-claves para generar una nueva"
+secreto() { printf '%s\n    %s\n\n' "$1" "$2"; }
 
+if [ -n "$OPENAI_API_KEY" ]; then
+  VALOR_OPENAI="$OPENAI_API_KEY"
 else
-  for k in $CLAVES; do
-    aws iam delete-access-key --user-name "$CI_USER" --access-key-id "$k" >/dev/null
-    warn "access key $k borrada: deja de funcionar ahora mismo"
-  done
-  log "Creando access key para $CI_USER"
-  CREDS="$(aws iam create-access-key --user-name "$CI_USER" \
-    --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text)"
-  KEY_ID="$(printf '%s' "$CREDS" | cut -f1)"
-  KEY_SECRET="$(printf '%s' "$CREDS" | cut -f2)"
-  ok "access key $KEY_ID creada"
+  VALOR_OPENAI="(no encontre ninguna clave: crea este secreto cuando la tengas; sin ella la IA responde 503)"
 fi
 
-# ---------------------------------------------------------------------------
-# 8. Instancia lista para recibir despliegues
-# ---------------------------------------------------------------------------
-wait_ssm_ready "$INSTANCE_ID"
-
-log "Comprobando que cloud-init dejo Docker instalado"
-printf '%s\n' 'cloud-init status --wait || true' 'docker --version' 'docker compose version' \
-  | ssm_run "$INSTANCE_ID" "verificar Docker"
-
-# ---------------------------------------------------------------------------
-# 9. DNS
-# ---------------------------------------------------------------------------
-DNS_MANUAL=0
-ZONE_ID="$(find_hosted_zone "$APP_DOMAIN")"
-if [ -n "$ZONE_ID" ]; then
-  log "Creando registros en Route 53 (zona $ZONE_ID)"
-  dns_upsert "$ZONE_ID" "$APP_DOMAIN" A "$PUBLIC_IP"
-  dns_upsert "$ZONE_ID" "www.$APP_DOMAIN" CNAME "$APP_DOMAIN"
-  ok "$APP_DOMAIN y www -> $PUBLIC_IP"
+if [ "$DOMINIO_PROPIO" = 1 ]; then
+  NOTA_DNS="ANTES del primer deploy, en el panel DNS de $APP_DOMAIN: registro A
+   con nombre @ (o el subdominio) apuntando a $PUBLIC_IP. Sin eso Caddy no
+   puede sacar el certificado HTTPS."
 else
-  DNS_MANUAL=1
+  NOTA_DNS="No hay que tocar ningun DNS: $APP_DOMAIN ya resuelve a $PUBLIC_IP."
 fi
 
-# El apex se escribe "@" en casi todos los paneles; un subdominio, solo la
-# parte de la izquierda.
-case "$APP_DOMAIN" in
-  *.*.*) NOMBRE_REGISTRO="${APP_DOMAIN%%.*}" ;;
-  *)     NOMBRE_REGISTRO="@" ;;
-esac
+{
+  cat <<CABECERA
+================================================================================
+ SECRETOS DE GITHUB - $PROJECT
+ Generado el $(date '+%Y-%m-%d %H:%M') por infra/aws-up.sh
+ Cuenta AWS $ACCOUNT - region $AWS_REGION
 
-RESUELVE="$(resolve_host "$APP_DOMAIN")"
-if [ "$RESUELVE" = "$PUBLIC_IP" ]; then
-  DNS_ESTADO="ya resuelve a $PUBLIC_IP: correcto"
-elif [ -z "$RESUELVE" ] || [ "$RESUELVE" = "__sin_resolver__" ]; then
-  DNS_ESTADO="todavia no resuelve a ninguna IP"
-else
-  DNS_ESTADO="resuelve a $RESUELVE, deberia resolver a $PUBLIC_IP"
-fi
+ TIENE CREDENCIALES EN CLARO: no lo subas a git ni lo compartas.
+================================================================================
 
-if [ "$DNS_MANUAL" = "1" ]; then
-  if [ "$RESUELVE" = "$PUBLIC_IP" ]; then
-    ok "DNS: $DNS_ESTADO"
-  else
-    warn "DNS: $DNS_ESTADO (ver $OUT_FILE)"
-  fi
-fi
+ Aplicacion:  https://$APP_DOMAIN
+ API:         https://$APP_DOMAIN/api/health
 
-if [ "$ESPERAR_DNS" = "1" ]; then
-  wait_dns "$APP_DOMAIN" "$PUBLIC_IP" 60 || true
-fi
-
-# ---------------------------------------------------------------------------
-# 10. El fichero con todo lo que va a GitHub
-# ---------------------------------------------------------------------------
-POSTGRES_PASSWORD="$(leer_env POSTGRES_PASSWORD)"
-JWT_SECRET="$(leer_env JWT_SECRET)"
-OPENAI_API_KEY="$(leer_env OPENAI_API_KEY)"
-[ -n "$OPENAI_API_KEY" ] || OPENAI_API_KEY="(opcional: pon tu clave o no crees el secreto)"
-
-log "Escribiendo $OUT_FILE"
-cat > "$OUT_FILE" <<SALIDA
-===============================================================================
- $STACK  ·  secretos y variables de GitHub
- Generado por aws-up.sh el $(date '+%Y-%m-%d %H:%M')
- Cuenta AWS $ACCOUNT · region $AWS_REGION
-
- CONTIENE CREDENCIALES EN CLARO. No lo subas a git ni lo pegues en un chat.
-===============================================================================
-
-RECURSOS CREADOS
---------------------------------------------------------------------------------
-  Instancia EC2       $INSTANCE_ID ($INSTANCE_TYPE)
-  IP publica          $PUBLIC_IP
-  Dominio             https://$APP_DOMAIN
-  Security group      $SG_ID
-  Rol de instancia    $ROLE_NAME
-  Usuario de CI       $CI_USER
-  ECR backend         $(ecr_uri "$ECR_REPO")
-  ECR frontend        $(ecr_uri "$ECR_REPO_FRONTEND")
-  Consola remota      aws ssm start-session --target $INSTANCE_ID --region $AWS_REGION
+ Donde se cargan: en cada repositorio, Settings > Secrets and variables >
+ Actions > New repository secret. Copia el NOMBRE y el VALOR tal cual.
 
 
-PASO 1 · DNS
---------------------------------------------------------------------------------
-  Estado ahora mismo: $APP_DOMAIN $DNS_ESTADO
+################################################################################
+ BACKEND  -  $GH_REPO_BACKEND
+ https://github.com/$GH_REPO_BACKEND/settings/secrets/actions
+################################################################################
 
-  En el panel de tu proveedor (Hostinger: hPanel > Dominios > $APP_DOMAIN > DNS),
-  los registros tienen que quedar exactamente asi:
+CABECERA
+  secreto AWS_ACCESS_KEY_ID "$CI_KEY_ID"
+  secreto AWS_SECRET_ACCESS_KEY "$CI_KEY_SECRET"
+  secreto AWS_REGION "$AWS_REGION"
+  secreto APP_DOMAIN "$APP_DOMAIN"
+  secreto POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
+  secreto JWT_SECRET "$JWT_SECRET"
+  secreto OPENAI_API_KEY "$VALOR_OPENAI"
+  cat <<FRONTEND
 
-    Registro 1
-      Tipo:       A
-      Nombre:     $NOMBRE_REGISTRO
-      Contenido:  $PUBLIC_IP
-      TTL:        300
+################################################################################
+ FRONTEND  -  $GH_REPO_FRONTEND
+ https://github.com/$GH_REPO_FRONTEND/settings/secrets/actions
+################################################################################
 
-    Registro 2
-      Tipo:       CNAME
-      Nombre:     www
-      Contenido:  $APP_DOMAIN
-      TTL:        300
+FRONTEND
+  secreto AWS_ACCESS_KEY_ID "$CI_KEY_ID"
+  secreto AWS_SECRET_ACCESS_KEY "$CI_KEY_SECRET"
+  secreto AWS_REGION "$AWS_REGION"
+  secreto APP_DOMAIN "$APP_DOMAIN"
+  cat <<PIE
 
-  - Si ya existe un registro A con nombre "$NOMBRE_REGISTRO", EDITALO. No anadas un
-    segundo: dos registros A para el mismo nombre reparten el trafico y la
-    mitad de las visitas acabaria en el servidor equivocado.
-  - Borra cualquier registro A llamado "api" de versiones anteriores. Con un
-    solo dominio, la API vive en https://$APP_DOMAIN/api.
-  - Si el registro vuelve solo a una IP que no es la tuya, el dominio esta
-    atado a un plan de hosting: desvinculalo en hPanel > Sitios web.
-  - No toques los registros MX ni TXT si usas el correo de ese dominio.
-  - No hace falta activar SSL en el panel: el certificado lo emite Caddy en el
-    primer despliegue.
+================================================================================
+ PRIMER DESPLIEGUE
+================================================================================
+ 1. $NOTA_DNS
+ 2. Carga los secretos de arriba en los dos repositorios.
+ 3. Backend primero: push a main (o Actions > "Desplegar backend" > Run
+    workflow). Espera a que termine: deja Caddy, la API y PostgreSQL
+    corriendo en la instancia.
+ 4. Frontend despues: push a main (o "Desplegar frontend" > Run workflow).
+ 5. Abre https://$APP_DOMAIN
 
+ Desde ahi, cada push a main de cualquiera de los dos repositorios se
+ despliega solo.
 
-PASO 2 · REPOSITORIO DEL BACKEND
---------------------------------------------------------------------------------
-  $GH_REPO_BACKEND
-  Settings > Secrets and variables > Actions
+ POSTGRES_PASSWORD no se puede cambiar despues del primer despliegue: la base
+ ya se creo con esa contrasena.
 
-  --- Secrets (pestana Secrets) ---
-
-  AWS_ACCESS_KEY_ID=$KEY_ID
-  AWS_SECRET_ACCESS_KEY=$KEY_SECRET
-  POSTGRES_PASSWORD=$POSTGRES_PASSWORD
-  JWT_SECRET=$JWT_SECRET
-  OPENAI_API_KEY=$OPENAI_API_KEY
-
-  --- Variables (pestana Variables) ---
-  Opcionales: el workflow ya trae estos mismos valores por defecto.
-
-  AWS_REGION=$AWS_REGION
-  APP_DOMAIN=$APP_DOMAIN
-  JWT_EXPIRES_IN=$(leer_env JWT_EXPIRES_IN)
-  BCRYPT_ROUNDS=$(leer_env BCRYPT_ROUNDS)
-  OPENAI_MODEL=$(leer_env OPENAI_MODEL)
-  OPENAI_VOZ_MODELO=$(leer_env OPENAI_VOZ_MODELO)
-  OPENAI_VOZ=$(leer_env OPENAI_VOZ)
-  AUTOSAVE_INTERVAL_MS=$(leer_env AUTOSAVE_INTERVAL_MS)
-
-
-PASO 3 · REPOSITORIO DEL FRONTEND
---------------------------------------------------------------------------------
-  $GH_REPO_FRONTEND
-  Settings > Secrets and variables > Actions
-
-  --- Secrets ---
-  La MISMA access key que el backend. El frontend no lleva mas secretos: todo
-  lo que entra en el bundle es publico, lo lee cualquiera con el inspector.
-
-  AWS_ACCESS_KEY_ID=$KEY_ID
-  AWS_SECRET_ACCESS_KEY=$KEY_SECRET
-
-  --- Variables ---
-
-  AWS_REGION=$AWS_REGION
-  APP_DOMAIN=$APP_DOMAIN
-  VITE_API_URL=/api
-
-
-PASO 4 · PRIMER DESPLIEGUE
---------------------------------------------------------------------------------
-  1. Push a main en el BACKEND. Espera a que termine su pipeline: es quien
-     envia el docker-compose.yml y el Caddyfile a la instancia, levanta
-     PostgreSQL y crea el volumen "$WEB_VOLUME".
-  2. Push a main en el FRONTEND.
-
-  El orden solo importa esta primera vez. Despues, cada uno despliega cuando
-  quiera sin coordinarse con el otro.
-
-
-ATAJO CON LA CLI DE GITHUB
---------------------------------------------------------------------------------
-  Con "gh auth login" hecho, esto deja los dos repositorios configurados:
-
-gh secret set AWS_ACCESS_KEY_ID     --repo $GH_REPO_BACKEND  --body '$KEY_ID'
-gh secret set AWS_SECRET_ACCESS_KEY --repo $GH_REPO_BACKEND  --body '$KEY_SECRET'
-gh secret set POSTGRES_PASSWORD     --repo $GH_REPO_BACKEND  --body '$POSTGRES_PASSWORD'
-gh secret set JWT_SECRET            --repo $GH_REPO_BACKEND  --body '$JWT_SECRET'
-gh variable set AWS_REGION          --repo $GH_REPO_BACKEND  --body '$AWS_REGION'
-gh variable set APP_DOMAIN          --repo $GH_REPO_BACKEND  --body '$APP_DOMAIN'
-
-gh secret set AWS_ACCESS_KEY_ID     --repo $GH_REPO_FRONTEND --body '$KEY_ID'
-gh secret set AWS_SECRET_ACCESS_KEY --repo $GH_REPO_FRONTEND --body '$KEY_SECRET'
-gh variable set AWS_REGION          --repo $GH_REPO_FRONTEND --body '$AWS_REGION'
-gh variable set APP_DOMAIN          --repo $GH_REPO_FRONTEND --body '$APP_DOMAIN'
-gh variable set VITE_API_URL        --repo $GH_REPO_FRONTEND --body '/api'
-
-
-SI ALGO SALE MAL
---------------------------------------------------------------------------------
-  Logs de los contenedores, desde el repositorio del backend:
-      ./infra/logs.sh          todos
-      ./infra/logs.sh app 200  solo la aplicacion
-
-  Entrar a la maquina:
-      aws ssm start-session --target $INSTANCE_ID --region $AWS_REGION
-      sudo su -
-      cd $REMOTE_DIR && docker compose ps
-
-  Borrar todo:
-      ./aws-down.sh --snapshot
-SALIDA
-
+================================================================================
+ RECURSOS CREADOS  (para borrarlos todos: ./infra/aws-down.sh)
+================================================================================
+ Instancia EC2       $INSTANCE_ID ($INSTANCE_TYPE)
+ IP publica          $PUBLIC_IP ($ALLOC_ID)
+ Security group      $SG_ID
+ Rol / perfil        $ROLE_NAME / $PROFILE_NAME
+ Usuario del CI      $CI_USER
+ ECR                 $ECR_BACKEND, $ECR_FRONTEND
+ Consola remota      aws ssm start-session --target $INSTANCE_ID --region $AWS_REGION
+PIE
+} > "$OUT_FILE.tmp"
+mv "$OUT_FILE.tmp" "$OUT_FILE"
 chmod 600 "$OUT_FILE" 2>/dev/null || true
-ok "$OUT_FILE escrito"
+ok "archivo escrito"
 
-# ---------------------------------------------------------------------------
-# Resumen
-# ---------------------------------------------------------------------------
+TERMINADO=1
+
 cat <<FIN
 
-  ${C_GREEN}Infraestructura lista${C_RESET}
+${G}==============================================================================
+ Infraestructura lista
+==============================================================================${N}
 
-    Instancia   $INSTANCE_ID ($INSTANCE_TYPE)
-    IP publica  $PUBLIC_IP
-    Dominio     https://$APP_DOMAIN
-    Usuario CI  $CI_USER
+  Aplicacion   https://$APP_DOMAIN   (responde despues del primer deploy)
+  Instancia    $INSTANCE_ID  ($INSTANCE_TYPE, IP $PUBLIC_IP)
 
-  Todo lo que tienes que pegar en GitHub esta aqui, con sus valores:
+  Secretos de GitHub, separados por repositorio, con nombre y valor:
 
-    ${C_BLUE}$OUT_FILE${C_RESET}
+    ${B}$OUT_FILE${N}
 
-  Los secretos de la aplicacion, aqui:
-
-    ${C_BLUE}$ENV_FILE${C_RESET}
-
-  Ninguno de los dos se imprime en pantalla, para que no acaben en una captura.
+  Siguiente paso: cargarlos en GitHub y hacer push a main, primero en el
+  backend y despues en el frontend. Los pasos estan al final del archivo.
 FIN
-
-if [ -n "$KEY_AVISO" ]; then
-  cat <<AVISO
-  ${C_YELLOW}Aviso:${C_RESET} el fichero lleva NO_RECUPERABLE en AWS_SECRET_ACCESS_KEY.
-  El usuario $CI_USER ya tenia una access key y AWS solo muestra el secreto al
-  crearla. Si no lo tienes guardado:
-
-      ./aws-up.sh --rotar-claves
-
-  Eso borra la clave anterior (deja de funcionar al instante) y genera una nueva.
-
-AVISO
-fi
-
-if [ "$DNS_MANUAL" = "1" ] && [ "$RESUELVE" != "$PUBLIC_IP" ]; then
-  printf '  %sSiguiente paso:%s el DNS %s. Paso 1 del fichero.\n\n' \
-    "$C_YELLOW" "$C_RESET" "$DNS_ESTADO"
-fi

@@ -12,14 +12,10 @@
 # distintos no hay CORS que configurar, ni preflights, ni un handshake de
 # Socket.IO que pueda rechazarse por el Origin.
 
-# www redirige a la raiz en vez de servir el sitio dos veces: dos URLs con el
-# mismo contenido confunden a los buscadores y parten la sesion del navegador.
-# Requiere que www.{$APP_DOMAIN} resuelva a esta instancia; si borras ese
-# registro DNS, borra tambien este bloque o Caddy reintentara sacarle un
-# certificado indefinidamente.
-www.{$APP_DOMAIN} {
-	redir https://{$APP_DOMAIN}{uri} permanent
-}
+#
+# APP_DOMAIN lo crea infra/aws-up.sh: por defecto <ip>.sslip.io, que resuelve
+# solo a la IP de la instancia, asi Let's Encrypt emite el certificado sin
+# tocar ningun DNS.
 
 {$APP_DOMAIN} {
 	encode zstd gzip

@@ -21,10 +21,11 @@ concurrency:
   group: deploy-backend
   cancel-in-progress: false
 
+# Los valores salen de infra/secretos-github.txt, que genera infra/aws-up.sh.
 env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
   # Dominio unico: la aplicacion en / y la API en /api, misma instancia.
-  APP_DOMAIN: ${{ vars.APP_DOMAIN || 'galflabs.tech' }}
+  APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
 
 jobs:
   pruebas:
@@ -80,7 +81,7 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-terra' }}
           OPENAI_VOZ_MODELO: ${{ vars.OPENAI_VOZ_MODELO || 'gpt-realtime-2.1-mini' }}
           OPENAI_VOZ: ${{ vars.OPENAI_VOZ || 'marin' }}
-          CORS_ORIGIN: https://${{ vars.APP_DOMAIN || 'galflabs.tech' }}
+          CORS_ORIGIN: https://${{ secrets.APP_DOMAIN }}
           AUTOSAVE_INTERVAL_MS: ${{ vars.AUTOSAVE_INTERVAL_MS || '15000' }}
           # El fichero no existe en el runner; nombrarlo vacio evita que el
           # script intente leer uno que no le corresponde.

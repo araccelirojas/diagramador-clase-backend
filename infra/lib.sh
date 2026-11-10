@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# En Git Bash, que no convierta en rutas de Windows los argumentos con /.
+export MSYS_NO_PATHCONV=1 AWS_PAGER=''
+
 if [ -t 1 ]; then
   C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_RED=$'\033[31m'
   C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'
@@ -20,7 +23,8 @@ die()  { printf '%serror%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "falta el comando '$1'. ${2:-}"; }
 
 # Todas las llamadas a AWS pasan por aqui para no repetir la region.
-awsc() { aws --region "$AWS_REGION" "$@"; }
+# tr: la CLI de Windows termina las lineas en \r y en Git Bash se pegan a los ids.
+awsc() { aws --region "$AWS_REGION" "$@" | tr -d '\r'; }
 
 # "None" es lo que devuelve la CLI con --output text cuando no encuentra nada.
 none_to_empty() { [ "$1" = "None" ] && echo "" || echo "$1"; }

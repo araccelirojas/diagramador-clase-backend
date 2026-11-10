@@ -3,7 +3,8 @@ node_modules/
 .env.local
 generated/
 
-# Salida de infra/aws-up.sh: los dos llevan credenciales en claro.
+# Salida de infra/aws-up.sh y secretos para desplegar a mano: credenciales en claro.
+secretos-github.txt
 .env.deploy
 credenciales-github.txt
 backups/

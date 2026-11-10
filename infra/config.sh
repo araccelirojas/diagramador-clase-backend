@@ -12,7 +12,7 @@ STACK="${STACK:-${PROJECT}}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 
 # Dominio unico: la aplicacion en / y la API en /api, misma instancia.
-APP_DOMAIN="${APP_DOMAIN:-galflabs.tech}"
+APP_DOMAIN="${APP_DOMAIN:-}"  # lo genera infra/aws-up.sh (secreto APP_DOMAIN)
 
 ECR_REPO="${ECR_REPO:-${STACK}-backend}"
 INSTANCE_NAME="${INSTANCE_NAME:-${STACK}}"

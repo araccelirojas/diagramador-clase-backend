@@ -1,0 +1,3 @@
+# Los scripts de infra/ se ejecutan con bash, tambien desde Git Bash en
+# Windows: con fines de linea CRLF fallan al primer comando.
+*.sh text eol=lf

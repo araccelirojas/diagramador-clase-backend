@@ -25,6 +25,7 @@ MOSTRAR_LOGS=0
 if [ "${1:-}" = "--logs" ]; then MOSTRAR_LOGS=1; fi
 
 check_aws
+[ -n "$APP_DOMAIN" ] || die "falta APP_DOMAIN: es un secreto del repositorio (lo genera infra/aws-up.sh del backend)"
 
 # ---------------------------------------------------------------------------
 # 1. Reunir la configuracion
